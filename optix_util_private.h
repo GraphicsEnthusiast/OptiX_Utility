@@ -807,12 +807,14 @@ namespace optixu {
         uint32_t visibilityMask;
         OptixInstanceFlags flags;
         float instTransform[12];
+        OptixInstance* instOnHost;
+        CUdeviceptr instOnDevice;
 
     public:
         OPTIXU_OPAQUE_BRIDGE(Instance);
 
-        Priv(_Scene* _scene) :
-            scene(_scene) {
+        Priv(_Scene* _scene, CUdeviceptr _instOnDevice) :
+            scene(_scene), instOnHost(nullptr), instOnDevice(_instOnDevice) {
             matSetIndex = 0xFFFFFFFF;
             id = 0;
             visibilityMask = 0xFF;
@@ -823,8 +825,12 @@ namespace optixu {
                 0, 0, 1, 0,
             };
             std::copy_n(identity, 12, instTransform);
+            if (instOnDevice)
+                instOnHost = new OptixInstance;
         }
         ~Priv() {
+            if (instOnHost)
+                delete instOnHost;
             getContext()->unregisterName(this);
         }
 
@@ -839,8 +845,8 @@ namespace optixu {
 
 
 
-        void fillInstance(OptixInstance* instance) const;
-        void updateInstance(OptixInstance* instance) const;
+        void fillInstance(OptixInstance* instance, CUdeviceptr* instPointer, CUstream stream) const;
+        void updateInstance(OptixInstance* instance, CUstream stream) const;
         bool isMotionAS() const;
         bool isTransform() const;
     };
@@ -853,6 +859,7 @@ namespace optixu {
         std::vector<_Instance*> children;
         OptixBuildInput buildInput;
         std::vector<OptixInstance> instances;
+        std::vector<CUdeviceptr> instancePointers;
 
         OptixAccelBuildOptions buildOptions;
         OptixAccelBufferSizes memoryRequirement;
@@ -872,6 +879,7 @@ namespace optixu {
             unsigned int allowUpdate : 1;
             unsigned int allowCompaction : 1;
             unsigned int allowRandomInstanceAccess : 1;
+            unsigned int useInstancePointers : 1;
             unsigned int readyToBuild : 1;
             unsigned int available : 1;
             unsigned int readyToCompact : 1;
@@ -886,6 +894,7 @@ namespace optixu {
             handle(0), compactedHandle(0),
             tradeoff(ASTradeoff::Default),
             allowUpdate(false), allowCompaction(false), allowRandomInstanceAccess(false),
+            useInstancePointers(false),
             readyToBuild(false), available(false),
             readyToCompact(false), compactedAvailable(false) {
             scene->addIAS(this);
