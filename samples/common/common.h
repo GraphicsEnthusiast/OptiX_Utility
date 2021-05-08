@@ -67,7 +67,11 @@
 
 
 #ifdef HP_Platform_Windows_MSVC
+#   if defined(__CUDA_ARCH__)
+#       define devPrintf(fmt, ...) printf(fmt, ##__VA_ARGS__);
+#   else
 void devPrintf(const char* fmt, ...);
+#   endif
 #else
 #   define devPrintf(fmt, ...) printf(fmt, ##__VA_ARGS__);
 #endif
@@ -210,9 +214,11 @@ CUDA_DEVICE_FUNCTION uint32_t nthSetBit(uint32_t value, int32_t n) {
 
 
 
+#if !defined(__CUDA_ARCH__)
+// ----------------------------------------------------------------
 // JP: CUDAビルトインに対応する型・関数をホスト側で定義しておく。
 // EN: Define types and functions on the host corresponding to CUDA built-ins.
-#if !defined(__CUDA_ARCH__) || defined(OPTIXU_Platform_CodeCompletion)
+
 struct alignas(8) int2 {
     int32_t x, y;
     constexpr int2(int32_t v = 0) : x(v), y(v) {}
@@ -285,6 +291,9 @@ struct alignas(16) float4 {
 inline constexpr float4 make_float4(float x, float y, float z, float w) {
     return float4(x, y, z, w);
 }
+
+// END: Define types and functions on the host corresponding to CUDA built-ins.
+// ----------------------------------------------------------------
 #endif
 
 CUDA_DEVICE_FUNCTION float3 getXYZ(const float4 &v) {
@@ -468,6 +477,22 @@ CUDA_DEVICE_FUNCTION float3 normalize(const float3 &v) {
     return v / length(v);
 }
 
+CUDA_DEVICE_FUNCTION float4 min(const float4 &v0, const float4 &v1) {
+    return make_float4(std::fmin(v0.x, v1.x),
+                       std::fmin(v0.y, v1.y),
+                       std::fmin(v0.z, v1.z),
+                       std::fmin(v0.w, v1.w));
+}
+CUDA_DEVICE_FUNCTION float4 max(const float4 &v0, const float4 &v1) {
+    return make_float4(std::fmax(v0.x, v1.x),
+                       std::fmax(v0.y, v1.y),
+                       std::fmax(v0.z, v1.z),
+                       std::fmax(v0.w, v1.w));
+}
+CUDA_DEVICE_FUNCTION float dot(const float4 &v0, const float4 &v1) {
+    return v0.x * v1.x + v0.y * v1.y + v0.z * v1.z + v0.w * v1.w;
+}
+
 
 
 CUDA_DEVICE_FUNCTION float3 HSVtoRGB(float h, float s, float v) {
@@ -518,6 +543,10 @@ CUDA_DEVICE_FUNCTION float3 sRGB_degamma(const float3 &value) {
     return make_float3(sRGB_degamma_s(value.x),
                        sRGB_degamma_s(value.y),
                        sRGB_degamma_s(value.z));
+}
+
+CUDA_DEVICE_FUNCTION float sRGB_calcLuminance(const float3 &value) {
+    return 0.2126729f * value.x + 0.7151522f * value.y + 0.0721750f * value.z;
 }
 
 
@@ -621,6 +650,7 @@ struct Matrix3x3 {
 
         return *this;
     }
+
     CUDA_DEVICE_FUNCTION Matrix3x3 &transpose() {
         float temp;
         temp = m10; m10 = m01; m01 = temp;
@@ -640,9 +670,9 @@ CUDA_DEVICE_FUNCTION Matrix3x3 inverse(const Matrix3x3 &mat) {
 }
 
 CUDA_DEVICE_FUNCTION Matrix3x3 scale3x3(const float3 &s) {
-    return Matrix3x3(s.x * make_float3(1, 0, 0),
-                     s.y * make_float3(0, 1, 0),
-                     s.z * make_float3(0, 0, 1));
+    return Matrix3x3(make_float3(s.x, 0, 0),
+                     make_float3(0, s.y, 0),
+                     make_float3(0, 0, s.z));
 }
 CUDA_DEVICE_FUNCTION Matrix3x3 scale3x3(float sx, float sy, float sz) {
     return scale3x3(make_float3(sx, sy, sz));
@@ -676,6 +706,212 @@ CUDA_DEVICE_FUNCTION Matrix3x3 rotate3x3(float angle, float ax, float ay, float 
 CUDA_DEVICE_FUNCTION Matrix3x3 rotateX3x3(float angle) { return rotate3x3(angle, make_float3(1, 0, 0)); }
 CUDA_DEVICE_FUNCTION Matrix3x3 rotateY3x3(float angle) { return rotate3x3(angle, make_float3(0, 1, 0)); }
 CUDA_DEVICE_FUNCTION Matrix3x3 rotateZ3x3(float angle) { return rotate3x3(angle, make_float3(0, 0, 1)); }
+
+
+
+struct Matrix4x4 {
+    union {
+        struct { float m00, m10, m20, m30; };
+        float4 c0;
+    };
+    union {
+        struct { float m01, m11, m21, m31; };
+        float4 c1;
+    };
+    union {
+        struct { float m02, m12, m22, m32; };
+        float4 c2;
+    };
+    union {
+        struct { float m03, m13, m23, m33; };
+        float4 c3;
+    };
+
+    CUDA_DEVICE_FUNCTION constexpr Matrix4x4() :
+        c0(make_float4(1, 0, 0, 0)),
+        c1(make_float4(0, 1, 0, 0)),
+        c2(make_float4(0, 0, 1, 0)),
+        c3(make_float4(0, 0, 0, 1)) { }
+    CUDA_DEVICE_FUNCTION Matrix4x4(const float array[9]) :
+        m00(array[0]), m10(array[1]), m20(array[2]), m30(array[3]),
+        m01(array[4]), m11(array[5]), m21(array[6]), m31(array[7]),
+        m02(array[8]), m12(array[9]), m22(array[10]), m32(array[11]),
+        m03(array[12]), m13(array[13]), m23(array[14]), m33(array[15]) { }
+    CUDA_DEVICE_FUNCTION constexpr Matrix4x4(const float4 &col0, const float4 &col1, const float4 &col2, const float4 &col3) :
+        c0(col0), c1(col1), c2(col2), c3(col3)
+    { }
+
+    CUDA_DEVICE_FUNCTION Matrix4x4 operator+() const {
+        return *this;
+    }
+    CUDA_DEVICE_FUNCTION Matrix4x4 operator-() const {
+        return Matrix4x4(-c0, -c1, -c2, -c3);
+    }
+
+    CUDA_DEVICE_FUNCTION Matrix4x4 operator+(const Matrix4x4 &mat) const {
+        return Matrix4x4(c0 + mat.c0, c1 + mat.c1, c2 + mat.c2, c3 + mat.c3);
+    }
+    CUDA_DEVICE_FUNCTION Matrix4x4 operator-(const Matrix4x4 &mat) const {
+        return Matrix4x4(c0 - mat.c0, c1 - mat.c1, c2 - mat.c2, c3 - mat.c3);
+    }
+    CUDA_DEVICE_FUNCTION Matrix4x4 operator*(const Matrix4x4 &mat) const {
+        const float4 r[] = { row(0), row(1), row(2), row(3) };
+        return Matrix4x4(make_float4(dot(r[0], mat.c0), dot(r[1], mat.c0), dot(r[2], mat.c0), dot(r[3], mat.c0)),
+                         make_float4(dot(r[0], mat.c1), dot(r[1], mat.c1), dot(r[2], mat.c1), dot(r[3], mat.c1)),
+                         make_float4(dot(r[0], mat.c2), dot(r[1], mat.c2), dot(r[2], mat.c2), dot(r[3], mat.c2)),
+                         make_float4(dot(r[0], mat.c3), dot(r[1], mat.c3), dot(r[2], mat.c3), dot(r[3], mat.c3)));
+    }
+    CUDA_DEVICE_FUNCTION float3 operator*(const float3 &v) const {
+        const float4 r[] = { row(0), row(1), row(2), row(3) };
+        float4 v4 = make_float4(v, 1.0f);
+        return make_float3(dot(r[0], v4),
+                           dot(r[1], v4),
+                           dot(r[2], v4));
+    }
+    CUDA_DEVICE_FUNCTION float4 operator*(const float4 &v) const {
+        const float4 r[] = { row(0), row(1), row(2), row(3) };
+        return make_float4(dot(r[0], v),
+                           dot(r[1], v),
+                           dot(r[2], v),
+                           dot(r[3], v));
+    }
+
+    CUDA_DEVICE_FUNCTION Matrix4x4 &operator*=(const Matrix4x4 &mat) {
+        const float4 r[] = { row(0), row(1), row(2), row(3) };
+        c0 = make_float4(dot(r[0], mat.c0), dot(r[1], mat.c0), dot(r[2], mat.c0), dot(r[3], mat.c0));
+        c1 = make_float4(dot(r[0], mat.c1), dot(r[1], mat.c1), dot(r[2], mat.c1), dot(r[3], mat.c1));
+        c2 = make_float4(dot(r[0], mat.c2), dot(r[1], mat.c2), dot(r[2], mat.c2), dot(r[3], mat.c2));
+        c3 = make_float4(dot(r[0], mat.c3), dot(r[1], mat.c3), dot(r[2], mat.c3), dot(r[3], mat.c3));
+        return *this;
+    }
+
+    CUDA_DEVICE_FUNCTION float4 row(unsigned int r) const {
+        //Assert(r < 3, "\"r\" is out of range [0, 2].");
+        switch (r) {
+        case 0:
+            return make_float4(m00, m01, m02, m03);
+        case 1:
+            return make_float4(m10, m11, m12, m13);
+        case 2:
+            return make_float4(m20, m21, m22, m23);
+        case 3:
+            return make_float4(m30, m31, m32, m33);
+        default:
+            return make_float4(0, 0, 0, 0);
+        }
+    }
+
+    CUDA_DEVICE_FUNCTION Matrix4x4 &inverse() {
+        float inv[] = {
+            +((m11 * m22 * m33) - (m31 * m22 * m13) + (m21 * m32 * m13) - (m11 * m32 * m23) + (m31 * m12 * m23) - (m21 * m12 * m33)),
+            -((m10 * m22 * m33) - (m30 * m22 * m13) + (m20 * m32 * m13) - (m10 * m32 * m23) + (m30 * m12 * m23) - (m20 * m12 * m33)),
+            +((m10 * m21 * m33) - (m30 * m21 * m13) + (m20 * m31 * m13) - (m10 * m31 * m23) + (m30 * m11 * m23) - (m20 * m11 * m33)),
+            -((m10 * m21 * m32) - (m30 * m21 * m12) + (m20 * m31 * m12) - (m10 * m31 * m22) + (m30 * m11 * m22) - (m20 * m11 * m32)),
+
+            -((m01 * m22 * m33) - (m31 * m22 * m03) + (m21 * m32 * m03) - (m01 * m32 * m23) + (m31 * m02 * m23) - (m21 * m02 * m33)),
+            +((m00 * m22 * m33) - (m30 * m22 * m03) + (m20 * m32 * m03) - (m00 * m32 * m23) + (m30 * m02 * m23) - (m20 * m02 * m33)),
+            -((m00 * m21 * m33) - (m30 * m21 * m03) + (m20 * m31 * m03) - (m00 * m31 * m23) + (m30 * m01 * m23) - (m20 * m01 * m33)),
+            +((m00 * m21 * m32) - (m30 * m21 * m02) + (m20 * m31 * m02) - (m00 * m31 * m22) + (m30 * m01 * m22) - (m20 * m01 * m32)),
+
+            +((m01 * m12 * m33) - (m31 * m12 * m03) + (m11 * m32 * m03) - (m01 * m32 * m13) + (m31 * m02 * m13) - (m11 * m02 * m33)),
+            -((m00 * m12 * m33) - (m30 * m12 * m03) + (m10 * m32 * m03) - (m00 * m32 * m13) + (m30 * m02 * m13) - (m10 * m02 * m33)),
+            +((m00 * m11 * m33) - (m30 * m11 * m03) + (m10 * m31 * m03) - (m00 * m31 * m13) + (m30 * m01 * m13) - (m10 * m01 * m33)),
+            -((m00 * m11 * m32) - (m30 * m11 * m02) + (m10 * m31 * m02) - (m00 * m31 * m12) + (m30 * m01 * m12) - (m10 * m01 * m32)),
+
+            -((m01 * m12 * m23) - (m21 * m12 * m03) + (m11 * m22 * m03) - (m01 * m22 * m13) + (m21 * m02 * m13) - (m11 * m02 * m23)),
+            +((m00 * m12 * m23) - (m20 * m12 * m03) + (m10 * m22 * m03) - (m00 * m22 * m13) + (m20 * m02 * m13) - (m10 * m02 * m23)),
+            -((m00 * m11 * m23) - (m20 * m11 * m03) + (m10 * m21 * m03) - (m00 * m21 * m13) + (m20 * m01 * m13) - (m10 * m01 * m23)),
+            +((m00 * m11 * m22) - (m20 * m11 * m02) + (m10 * m21 * m02) - (m00 * m21 * m12) + (m20 * m01 * m12) - (m10 * m01 * m22)),
+        };
+
+        float recDet = 1.0f / (m00 * inv[0] + m10 * inv[4] + m20 * inv[8] + m30 * inv[12]);
+        for (int i = 0; i < 16; ++i)
+            inv[i] *= recDet;
+        *this = Matrix4x4(inv);
+
+        return *this;
+    }
+
+    CUDA_DEVICE_FUNCTION Matrix4x4 &transpose() {
+        float temp;
+        temp = m10; m10 = m01; m01 = temp;
+        temp = m20; m20 = m02; m02 = temp;
+        temp = m21; m21 = m12; m12 = temp;
+        temp = m30; m30 = m03; m03 = temp;
+        temp = m31; m31 = m13; m13 = temp;
+        temp = m32; m32 = m23; m23 = temp;
+        return *this;
+    }
+
+    CUDA_DEVICE_FUNCTION Matrix3x3 getUpperLeftMatrix() const {
+        return Matrix3x3(make_float3(c0), make_float3(c1), make_float3(c2));
+    }
+};
+
+CUDA_DEVICE_FUNCTION Matrix4x4 transpose(const Matrix4x4 &mat) {
+    Matrix4x4 ret = mat;
+    return ret.transpose();
+}
+CUDA_DEVICE_FUNCTION Matrix4x4 inverse(const Matrix4x4 &mat) {
+    Matrix4x4 ret = mat;
+    return ret.inverse();
+}
+
+CUDA_DEVICE_FUNCTION Matrix4x4 scale4x4(const float3 &s) {
+    return Matrix4x4(make_float4(s.x, 0, 0, 0),
+                     make_float4(0, s.y, 0, 0),
+                     make_float4(0, 0, s.z, 0),
+                     make_float4(0, 0, 0, 1));
+}
+CUDA_DEVICE_FUNCTION Matrix4x4 scale4x4(float sx, float sy, float sz) {
+    return scale4x4(make_float3(sx, sy, sz));
+}
+CUDA_DEVICE_FUNCTION Matrix4x4 scale4x4(float s) {
+    return scale4x4(make_float3(s, s, s));
+}
+
+CUDA_DEVICE_FUNCTION Matrix4x4 rotate4x4(float angle, const float3 &axis) {
+    Matrix4x4 matrix;
+    float3 nAxis = normalize(axis);
+    float s = std::sin(angle);
+    float c = std::cos(angle);
+    float oneMinusC = 1 - c;
+
+    matrix.m00 = nAxis.x * nAxis.x * oneMinusC + c;
+    matrix.m10 = nAxis.x * nAxis.y * oneMinusC + nAxis.z * s;
+    matrix.m20 = nAxis.z * nAxis.x * oneMinusC - nAxis.y * s;
+    matrix.m30 = 0.0f;
+    matrix.m01 = nAxis.x * nAxis.y * oneMinusC - nAxis.z * s;
+    matrix.m11 = nAxis.y * nAxis.y * oneMinusC + c;
+    matrix.m21 = nAxis.y * nAxis.z * oneMinusC + nAxis.x * s;
+    matrix.m31 = 0.0f;
+    matrix.m02 = nAxis.z * nAxis.x * oneMinusC + nAxis.y * s;
+    matrix.m12 = nAxis.y * nAxis.z * oneMinusC - nAxis.x * s;
+    matrix.m22 = nAxis.z * nAxis.z * oneMinusC + c;
+    matrix.m32 = 0.0f;
+    matrix.m03 = 0.0f;
+    matrix.m13 = 0.0f;
+    matrix.m23 = 0.0f;
+    matrix.m33 = 1.0f;
+
+    return matrix;
+}
+CUDA_DEVICE_FUNCTION Matrix4x4 rotate4x4(float angle, float ax, float ay, float az) {
+    return rotate4x4(angle, make_float3(ax, ay, az));
+}
+CUDA_DEVICE_FUNCTION Matrix4x4 rotateX4x4(float angle) { return rotate4x4(angle, make_float3(1, 0, 0)); }
+CUDA_DEVICE_FUNCTION Matrix4x4 rotateY4x4(float angle) { return rotate4x4(angle, make_float3(0, 1, 0)); }
+CUDA_DEVICE_FUNCTION Matrix4x4 rotateZ4x4(float angle) { return rotate4x4(angle, make_float3(0, 0, 1)); }
+
+CUDA_DEVICE_FUNCTION Matrix4x4 translate4x4(const float3 &t) {
+    return Matrix4x4(make_float4(1, 0, 0, 0),
+                     make_float4(0, 1, 0, 0),
+                     make_float4(0, 0, 1, 0),
+                     make_float4(t, 1.0f));
+}
+CUDA_DEVICE_FUNCTION Matrix4x4 translate4x4(float tx, float ty, float tz) {
+    return translate4x4(make_float3(tx, ty, tz));
+}
 
 
 
