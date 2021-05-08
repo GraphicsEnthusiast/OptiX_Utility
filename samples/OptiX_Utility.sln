@@ -33,6 +33,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "06.curve_primitive", "curve
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "10.temporal_denoiser", "temporal_denoiser\temporal_denoiser.vcxproj", "{461A4AC3-0084-4A9B-8A92-BF421C0EFA29}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "restir", "restir\restir.vcxproj", "{1EF1DE28-642D-4216-B2B3-CB456C99D435}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -95,6 +97,10 @@ Global
 		{461A4AC3-0084-4A9B-8A92-BF421C0EFA29}.Debug|x64.Build.0 = Debug|x64
 		{461A4AC3-0084-4A9B-8A92-BF421C0EFA29}.Release|x64.ActiveCfg = Release|x64
 		{461A4AC3-0084-4A9B-8A92-BF421C0EFA29}.Release|x64.Build.0 = Release|x64
+		{1EF1DE28-642D-4216-B2B3-CB456C99D435}.Debug|x64.ActiveCfg = Debug|x64
+		{1EF1DE28-642D-4216-B2B3-CB456C99D435}.Debug|x64.Build.0 = Debug|x64
+		{1EF1DE28-642D-4216-B2B3-CB456C99D435}.Release|x64.ActiveCfg = Release|x64
+		{1EF1DE28-642D-4216-B2B3-CB456C99D435}.Release|x64.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -103,6 +109,7 @@ Global
 		{38359F87-43FE-4312-AD65-AF8A77FA75CC} = {96731BEC-4108-4761-A436-B53FA6DEB8BE}
 		{95A8399F-C511-427E-B39E-34E4F6692064} = {96731BEC-4108-4761-A436-B53FA6DEB8BE}
 		{8846EDEF-3916-4976-A62B-CB0070B5BBA1} = {96731BEC-4108-4761-A436-B53FA6DEB8BE}
+		{1EF1DE28-642D-4216-B2B3-CB456C99D435} = {96731BEC-4108-4761-A436-B53FA6DEB8BE}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {A089BF53-6CD1-4F82-BFB8-00CE152F27F8}
