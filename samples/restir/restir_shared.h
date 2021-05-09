@@ -15,7 +15,7 @@ namespace Shared {
         RealType result;
         RealType comp;
 
-        CUDA_DEVICE_FUNCTION CompensatedSum(const RealType &value) : result(value), comp(0.0) { };
+        CUDA_DEVICE_FUNCTION CompensatedSum(const RealType &value = RealType(0)) : result(value), comp(0.0) { };
 
         CUDA_DEVICE_FUNCTION CompensatedSum &operator=(const RealType &value) {
             result = value;
@@ -208,11 +208,11 @@ namespace Shared {
 
 
     struct HitPointParams {
-        uint32_t instanceSlot;
-        uint32_t geomInstSlot;
-        uint32_t primitiveIndex;
-        float b1;
-        float b2;
+        float3 positionInWorld;
+        float3 prevPositionInWorld;
+        float3 normalInWorld;
+        float2 texCoord;
+        uint32_t materialSlot;
     };
 
 
@@ -225,50 +225,58 @@ namespace Shared {
 
 
     struct LightSample {
-        float uLight;
-        float uPosition[2];
+        uint32_t instIndex;
+        uint32_t geomInstIndex;
+        uint32_t primIndex;
+        float b1;
+        float b2;
     };
 
-    template <typename SampleType, uint32_t N>
+    template <typename SampleType>
     class Reservoir {
-        SampleType m_samples[N];
+        SampleType m_sample;
         FloatSum m_sumWeights;
         uint32_t m_numSamples;
+        float m_targetDensityValue;
+        float m_recPDFValue;
 
     public:
         CUDA_DEVICE_FUNCTION void initialize() {
             m_sumWeights = 0;
             m_numSamples = 0;
         }
-        CUDA_DEVICE_FUNCTION void update(const SampleType &newSample, float weight, float u, float uSlot) {
+        CUDA_DEVICE_FUNCTION void update(const SampleType &newSample, float targetDensity, float weight, float u) {
             m_sumWeights += weight;
-            if constexpr (N > 1) {
-                if (m_numSamples < N) {
-                    m_samples[m_numSamples] = newSample;
-                }
-                else {
-                    if (u < N * weight / m_sumWeights) {
-                        uint32_t slot = min(static_cast<uint32_t>(uSlot * N), N - 1);
-                        m_samples[slot] = newSample;
-                    }
-                }
-            }
-            else {
-                (void)uSlot;
-                if (u < weight / m_sumWeights)
-                    m_samples[0] = newSample;
+            if (u < weight / m_sumWeights) {
+                m_sample = newSample;
+                m_targetDensityValue = targetDensity;
             }
             ++m_numSamples;
         }
 
-        CUDA_DEVICE_FUNCTION LightSample getSample(uint32_t slot) const {
-            if constexpr (N > 1)
-                return m_samples[slot];
-            else
-                return m_samples[0];
+        CUDA_DEVICE_FUNCTION LightSample getSample() const {
+            return m_sample;
         }
         CUDA_DEVICE_FUNCTION float getSumWeights() const {
             return m_sumWeights;
+        }
+        CUDA_DEVICE_FUNCTION uint32_t getNumSamples() const {
+            return m_numSamples;
+        }
+        CUDA_DEVICE_FUNCTION void setNumSamples(uint32_t numSamples) {
+            m_numSamples = numSamples;
+        }
+
+        CUDA_DEVICE_FUNCTION void calcRecPDFValue() {
+            m_recPDFValue = m_sumWeights / (m_targetDensityValue * m_numSamples);
+            if (!isfinite(m_recPDFValue))
+                m_recPDFValue = 0;
+        }
+        CUDA_DEVICE_FUNCTION float getRecPDFValue() const {
+            return m_recPDFValue;
+        }
+        CUDA_DEVICE_FUNCTION void setRecPDFValue(float v) {
+            m_recPDFValue = v;
         }
     };
 
@@ -286,54 +294,64 @@ namespace Shared {
         unsigned int hit : 1;
     };
 
+
+
+    struct GBuffer0 {
+        float3 positionInWorld;
+        float texCoord_x;
+    };
+
+    struct GBuffer1 {
+        float3 normalInWorld;
+        float texCoord_y;
+    };
+
+    struct GBuffer2 {
+        float2 motionVector;
+        uint32_t materialSlot;
+    };
+
     
     
-    struct PipelineLaunchParameters {
-        OptixTraversableHandle travHandle;
+    struct StaticPipelineLaunchParameters {
         int2 imageSize;
-        uint32_t numAccumFrames;
         optixu::BlockBuffer2D<PCG32RNG, 1> rngBuffer;
 
-        union ReservoirBuffer {
-            optixu::BlockBuffer2D<Reservoir<LightSample, 1>, 1> n1;
-            optixu::BlockBuffer2D<Reservoir<LightSample, 2>, 1> n2;
-            optixu::BlockBuffer2D<Reservoir<LightSample, 4>, 1> n4;
-            optixu::BlockBuffer2D<Reservoir<LightSample, 8>, 1> n8;
-
-            ReservoirBuffer() {}
-            
-            template <uint32_t log2NumSamples>
-            CUDA_DEVICE_FUNCTION Reservoir<LightSample, (1 << log2NumSamples)> &get(const uint2 &index) {
-                if constexpr (log2NumSamples == 0)
-                    return n1[index];
-                else if constexpr (log2NumSamples == 1)
-                    return n2[index];
-                else if constexpr (log2NumSamples == 2)
-                    return n4[index];
-                else /*if constexpr (log2NumSamples == 3)*/
-                    return n8[index];
-            }
-        } reservoirBuffer;
-        optixu::BlockBuffer2D<HitPointParams, 1> hitPointParamsBuffer;
-        unsigned int log2NumCandidateSamples : 8;
-        unsigned int log2NumSamples : 2;
+        optixu::NativeBlockBuffer2D<GBuffer0> GBuffer0;
+        optixu::NativeBlockBuffer2D<GBuffer1> GBuffer1;
+        optixu::NativeBlockBuffer2D<GBuffer2> GBuffer2;
 
         const MaterialData* materialDataBuffer;
         const GeometryInstanceData* geometryInstanceDataBuffer;
-        const InstanceData* instanceDataBuffer;
         DiscreteDistribution1D lightInstDist;
 
         optixu::NativeBlockBuffer2D<float4> beautyAccumBuffer;
         optixu::NativeBlockBuffer2D<float4> albedoAccumBuffer;
         optixu::NativeBlockBuffer2D<float4> normalAccumBuffer;
-        float2* linearFlowBuffer;
+    };
+
+    struct PerFramePipelineLaunchParameters {
+        OptixTraversableHandle travHandle;
+        uint32_t numAccumFrames;
+
+        optixu::BlockBuffer2D<Reservoir<LightSample>, 1> reservoirBuffer[2];
+
+        const InstanceData* instanceDataBuffer;
+
         PerspectiveCamera camera;
         PerspectiveCamera prevCamera;
 
         int2 mousePosition;
         PickInfo* pickInfo;
 
+        unsigned int log2NumCandidateSamples : 8;
         unsigned int resetFlowBuffer : 1;
+    };
+    
+    struct PipelineLaunchParameters {
+        StaticPipelineLaunchParameters* s;
+        PerFramePipelineLaunchParameters* f;
+        unsigned int currentReservoirIndex : 1;
     };
 
 
@@ -347,5 +365,5 @@ namespace Shared {
     };
 }
 
-#define PrimaryRayPayloadSignature Shared::PCG32RNG, Shared::HitPointParams*, float3
+#define PrimaryRayPayloadSignature Shared::PCG32RNG, Shared::HitPointParams*, Shared::PickInfo*
 #define VisibilityRayPayloadSignature float
