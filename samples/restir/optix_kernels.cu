@@ -388,9 +388,10 @@ CUDA_DEVICE_KERNEL void RT_RG_NAME(primary)() {
     gBuffer2.motionVector = motionVector;
     gBuffer2.materialSlot = hitPointParams.materialSlot;
 
-    plp.s->GBuffer0.write(launchIndex, gBuffer0);
-    plp.s->GBuffer1.write(launchIndex, gBuffer1);
-    plp.s->GBuffer2.write(launchIndex, gBuffer2);
+    uint32_t bufIdx = plp.f->bufferIndex;
+    plp.s->GBuffer0[bufIdx].write(launchIndex, gBuffer0);
+    plp.s->GBuffer1[bufIdx].write(launchIndex, gBuffer1);
+    plp.s->GBuffer2[bufIdx].write(launchIndex, gBuffer2);
 
     if (launchIndex.x == plp.f->mousePosition.x &&
         launchIndex.y == plp.f->mousePosition.y)
@@ -658,14 +659,35 @@ CUDA_DEVICE_KERNEL void RT_CH_NAME(primary)() {
 
 
 
+CUDA_DEVICE_FUNCTION bool testNeighbor(
+    uint32_t nBufIdx, int2 neighborIndex, float dist, const float3 &normalInWorld) {
+    if (neighborIndex.x < 0 || neighborIndex.x >= plp.s->imageSize.x ||
+        neighborIndex.y < 0 || neighborIndex.y >= plp.s->imageSize.y)
+        return false;
+
+    GBuffer0 nGBuffer0 = plp.s->GBuffer0[nBufIdx].read(neighborIndex);
+    GBuffer1 nGBuffer1 = plp.s->GBuffer1[nBufIdx].read(neighborIndex);
+    float3 nPositionInWorld = nGBuffer0.positionInWorld;
+    float3 nNormalInWorld = nGBuffer1.normalInWorld;
+    float nDist = length(plp.f->camera.position - nPositionInWorld);
+    if (abs(nDist - dist) / dist > 0.1f || dot(normalInWorld, nNormalInWorld) < 0.9f)
+        return false;
+
+    return true;
+}
+
+
+
 CUDA_DEVICE_KERNEL void RT_RG_NAME(combineTemporalNeighbors)() {
     int2 launchIndex = make_int2(optixGetLaunchIndex().x, optixGetLaunchIndex().y);
 
     PCG32RNG rng = plp.s->rngBuffer[launchIndex];
 
-    GBuffer0 gBuffer0 = plp.s->GBuffer0.read(launchIndex);
-    GBuffer1 gBuffer1 = plp.s->GBuffer1.read(launchIndex);
-    GBuffer2 gBuffer2 = plp.s->GBuffer2.read(launchIndex);
+    uint32_t curBufIdx = plp.f->bufferIndex;
+    uint32_t prevBufIdx = (curBufIdx + 1) % 2;
+    GBuffer0 gBuffer0 = plp.s->GBuffer0[curBufIdx].read(launchIndex);
+    GBuffer1 gBuffer1 = plp.s->GBuffer1[curBufIdx].read(launchIndex);
+    GBuffer2 gBuffer2 = plp.s->GBuffer2[curBufIdx].read(launchIndex);
 
     float3 positionInWorld = gBuffer0.positionInWorld;
     float3 normalInWorld = gBuffer1.normalInWorld;
@@ -679,7 +701,9 @@ CUDA_DEVICE_KERNEL void RT_RG_NAME(combineTemporalNeighbors)() {
         BSDF bsdf;
         mat.setupBSDF(mat, texCoord, &bsdf);
         ReferenceFrame shadingFrame(normalInWorld);
-        float3 vOut = normalize(plp.f->camera.position - positionInWorld);
+        float3 vOut = plp.f->camera.position - positionInWorld;
+        float dist = length(vOut);
+        vOut /= dist;
         float3 vOutLocal = shadingFrame.toLocal(vOut);
 
         uint32_t curResIndex = plp.currentReservoirIndex;
@@ -696,10 +720,9 @@ CUDA_DEVICE_KERNEL void RT_RG_NAME(combineTemporalNeighbors)() {
 
         int2 neighborIndex = make_int2(launchIndex.x + 0.5f - motionVector.x,
                                        launchIndex.y + 0.5f - motionVector.y);
-        if (neighborIndex.x >= 0 && neighborIndex.x < plp.s->imageSize.x &&
-            neighborIndex.y >= 0 && neighborIndex.y < plp.s->imageSize.y) {
+        if (testNeighbor(prevBufIdx, neighborIndex, dist, normalInWorld)) {
             const Reservoir<LightSample> &neighbor = plp.s->reservoirBuffer[prevResIndex][neighborIndex];
-            
+
             LightSample lightSample = neighbor.getSample();
             float3 cont = evaluateUnshadowedContribution(positionInWorld, vOutLocal, shadingFrame, bsdf, lightSample);
             float targetDensity = convertToWeight(cont); // unnormalized
@@ -725,9 +748,10 @@ CUDA_DEVICE_KERNEL void RT_RG_NAME(combineSpatialNeighbors)() {
 
     PCG32RNG rng = plp.s->rngBuffer[launchIndex];
 
-    GBuffer0 gBuffer0 = plp.s->GBuffer0.read(launchIndex);
-    GBuffer1 gBuffer1 = plp.s->GBuffer1.read(launchIndex);
-    GBuffer2 gBuffer2 = plp.s->GBuffer2.read(launchIndex);
+    uint32_t bufIdx = plp.f->bufferIndex;
+    GBuffer0 gBuffer0 = plp.s->GBuffer0[bufIdx].read(launchIndex);
+    GBuffer1 gBuffer1 = plp.s->GBuffer1[bufIdx].read(launchIndex);
+    GBuffer2 gBuffer2 = plp.s->GBuffer2[bufIdx].read(launchIndex);
 
     float3 positionInWorld = gBuffer0.positionInWorld;
     float3 normalInWorld = gBuffer1.normalInWorld;
@@ -772,29 +796,19 @@ CUDA_DEVICE_KERNEL void RT_RG_NAME(combineSpatialNeighbors)() {
             }
             int2 neighborIndex = make_int2(launchIndex.x + 0.5f + deltaX,
                                            launchIndex.y + 0.5f + deltaY);
-            if (neighborIndex.x < 0 || neighborIndex.x >= plp.s->imageSize.x ||
-                neighborIndex.y < 0 || neighborIndex.y >= plp.s->imageSize.y ||
-                (launchIndex.x == neighborIndex.x && launchIndex.y == neighborIndex.y))
-                continue;
+            if (testNeighbor(bufIdx, neighborIndex, dist, normalInWorld) &&
+                (neighborIndex.x != launchIndex.x || neighborIndex.y != launchIndex.y)) {
+                Reservoir<LightSample> neighbor = plp.s->reservoirBuffer[srcResIndex][neighborIndex];
 
-            GBuffer0 nGBuffer0 = plp.s->GBuffer0.read(neighborIndex);
-            GBuffer1 nGBuffer1 = plp.s->GBuffer1.read(neighborIndex);
-            float3 nPositionInWorld = nGBuffer0.positionInWorld;
-            float3 nNormalInWorld = nGBuffer1.normalInWorld;
-            float nDist = length(plp.f->camera.position - nPositionInWorld);
-            if (abs(nDist - dist) / dist > 0.1f || dot(normalInWorld, nNormalInWorld) < 0.9f)
-                continue;
+                LightSample lightSample = neighbor.getSample();
+                float3 cont = evaluateUnshadowedContribution(positionInWorld, vOutLocal, shadingFrame, bsdf, lightSample);
+                float targetDensity = convertToWeight(cont); // unnormalized
+                uint32_t streamLength = neighbor.getStreamLength();
+                float weight = targetDensity * neighbor.getRecPDFValue() * streamLength;
+                combinedReservoir.update(lightSample, targetDensity, weight, rng.getFloat0cTo1o());
 
-            Reservoir<LightSample> neighbor = plp.s->reservoirBuffer[srcResIndex][neighborIndex];
-
-            LightSample lightSample = neighbor.getSample();
-            float3 cont = evaluateUnshadowedContribution(positionInWorld, vOutLocal, shadingFrame, bsdf, lightSample);
-            float targetDensity = convertToWeight(cont); // unnormalized
-            uint32_t streamLength = neighbor.getStreamLength();
-            float weight = targetDensity * neighbor.getRecPDFValue() * streamLength;
-            combinedReservoir.update(lightSample, targetDensity, weight, rng.getFloat0cTo1o());
-
-            combinedStreamLength += streamLength;
+                combinedStreamLength += streamLength;
+            }
         }
         combinedReservoir.setStreamLength(combinedStreamLength);
         combinedReservoir.calcRecPDFValue();
@@ -847,9 +861,10 @@ CUDA_DEVICE_FUNCTION float3 performDirectLighting(
 CUDA_DEVICE_KERNEL void RT_RG_NAME(shading)() {
     uint2 launchIndex = make_uint2(optixGetLaunchIndex().x, optixGetLaunchIndex().y);
 
-    GBuffer0 gBuffer0 = plp.s->GBuffer0.read(launchIndex);
-    GBuffer1 gBuffer1 = plp.s->GBuffer1.read(launchIndex);
-    GBuffer2 gBuffer2 = plp.s->GBuffer2.read(launchIndex);
+    uint32_t bufIdx = plp.f->bufferIndex;
+    GBuffer0 gBuffer0 = plp.s->GBuffer0[bufIdx].read(launchIndex);
+    GBuffer1 gBuffer1 = plp.s->GBuffer1[bufIdx].read(launchIndex);
+    GBuffer2 gBuffer2 = plp.s->GBuffer2[bufIdx].read(launchIndex);
 
     float3 positionInWorld = gBuffer0.positionInWorld;
     float3 normalInWorld = gBuffer1.normalInWorld;

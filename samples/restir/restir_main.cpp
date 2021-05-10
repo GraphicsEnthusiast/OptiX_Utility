@@ -1141,9 +1141,9 @@ int32_t main(int32_t argc, const char* argv[]) try {
     // JP: スクリーン関連のバッファーを初期化。
     // EN: Initialize screen-related buffers.
 
-    cudau::Array gBuffer0;
-    cudau::Array gBuffer1;
-    cudau::Array gBuffer2;
+    cudau::Array gBuffer0[2];
+    cudau::Array gBuffer1[2];
+    cudau::Array gBuffer2[2];
 
     optixu::HostBlockBuffer2D<Shared::Reservoir<Shared::LightSample>, 1> reservoirBuffer[2];
     
@@ -1160,19 +1160,23 @@ int32_t main(int32_t argc, const char* argv[]) try {
     optixu::HostBlockBuffer2D<Shared::PCG32RNG, 1> rngBuffer;
 
     const auto initializeScreenRelatedBuffers = [&]() {
-        gBuffer0.initialize2D(gpuEnv.cuContext, cudau::ArrayElementType::UInt32, (sizeof(Shared::GBuffer0) + 3) / 4,
-                              cudau::ArraySurface::Enable, cudau::ArrayTextureGather::Disable,
-                              renderTargetSizeX, renderTargetSizeY, 1);
-        gBuffer1.initialize2D(gpuEnv.cuContext, cudau::ArrayElementType::UInt32, (sizeof(Shared::GBuffer1) + 3) / 4,
-                              cudau::ArraySurface::Enable, cudau::ArrayTextureGather::Disable,
-                              renderTargetSizeX, renderTargetSizeY, 1);
-        gBuffer2.initialize2D(gpuEnv.cuContext, cudau::ArrayElementType::UInt32, (sizeof(Shared::GBuffer2) + 3) / 4,
-                              cudau::ArraySurface::Enable, cudau::ArrayTextureGather::Disable,
-                              renderTargetSizeX, renderTargetSizeY, 1);
+        for (int i = 0; i < 2; ++i) {
+            gBuffer0[i].initialize2D(
+                gpuEnv.cuContext, cudau::ArrayElementType::UInt32, (sizeof(Shared::GBuffer0) + 3) / 4,
+                cudau::ArraySurface::Enable, cudau::ArrayTextureGather::Disable,
+                renderTargetSizeX, renderTargetSizeY, 1);
+            gBuffer1[i].initialize2D(
+                gpuEnv.cuContext, cudau::ArrayElementType::UInt32, (sizeof(Shared::GBuffer1) + 3) / 4,
+                cudau::ArraySurface::Enable, cudau::ArrayTextureGather::Disable,
+                renderTargetSizeX, renderTargetSizeY, 1);
+            gBuffer2[i].initialize2D(
+                gpuEnv.cuContext, cudau::ArrayElementType::UInt32, (sizeof(Shared::GBuffer2) + 3) / 4,
+                cudau::ArraySurface::Enable, cudau::ArrayTextureGather::Disable,
+                renderTargetSizeX, renderTargetSizeY, 1);
 
-        for (int i = 0; i < 2; ++i)
             reservoirBuffer[i].initialize(gpuEnv.cuContext, GPUEnvironment::bufferType,
                                           renderTargetSizeX, renderTargetSizeY);
+        }
 
         beautyAccumBuffer.initialize2D(gpuEnv.cuContext, cudau::ArrayElementType::Float32, 4,
                                        cudau::ArraySurface::Enable, cudau::ArrayTextureGather::Disable,
@@ -1222,21 +1226,23 @@ int32_t main(int32_t argc, const char* argv[]) try {
         albedoAccumBuffer.finalize();
         beautyAccumBuffer.finalize();
 
-        for (int i = 1; i >= 0; --i)
+        for (int i = 1; i >= 0; --i) {
             reservoirBuffer[i].finalize();
 
-        gBuffer2.finalize();
-        gBuffer1.finalize();
-        gBuffer0.finalize();
+            gBuffer2[i].finalize();
+            gBuffer1[i].finalize();
+            gBuffer0[i].finalize();
+        }
     };
 
     const auto resizeScreenRelatedBuffers = [&](uint32_t width, uint32_t height) {
-        gBuffer0.resize(width, height);
-        gBuffer1.resize(width, height);
-        gBuffer2.resize(width, height);
+        for (int i = 0; i < 2; ++i) {
+            gBuffer0[i].resize(width, height);
+            gBuffer1[i].resize(width, height);
+            gBuffer2[i].resize(width, height);
 
-        for (int i = 0; i < 2; ++i)
             reservoirBuffer[i].resize(renderTargetSizeX, renderTargetSizeY);
+        }
 
         beautyAccumBuffer.resize(width, height);
         albedoAccumBuffer.resize(width, height);
@@ -1403,9 +1409,12 @@ int32_t main(int32_t argc, const char* argv[]) try {
     Shared::StaticPipelineLaunchParameters staticPlp = {};
     staticPlp.imageSize = int2(renderTargetSizeX, renderTargetSizeY);
     staticPlp.rngBuffer = rngBuffer.getBlockBuffer2D();
-    staticPlp.GBuffer0 = gBuffer0.getSurfaceObject(0);
-    staticPlp.GBuffer1 = gBuffer1.getSurfaceObject(0);
-    staticPlp.GBuffer2 = gBuffer2.getSurfaceObject(0);
+    staticPlp.GBuffer0[0] = gBuffer0[0].getSurfaceObject(0);
+    staticPlp.GBuffer0[1] = gBuffer0[1].getSurfaceObject(0);
+    staticPlp.GBuffer1[0] = gBuffer1[0].getSurfaceObject(0);
+    staticPlp.GBuffer1[1] = gBuffer1[1].getSurfaceObject(0);
+    staticPlp.GBuffer2[0] = gBuffer2[0].getSurfaceObject(0);
+    staticPlp.GBuffer2[1] = gBuffer2[1].getSurfaceObject(0);
     staticPlp.reservoirBuffer[0] = reservoirBuffer[0].getBlockBuffer2D();
     staticPlp.reservoirBuffer[1] = reservoirBuffer[1].getBlockBuffer2D();
     staticPlp.spatialNeighborDeltas = spatialNeighborDeltas.getDevicePointer();
@@ -1479,6 +1488,7 @@ int32_t main(int32_t argc, const char* argv[]) try {
         }
     };
 
+    uint32_t lastSpatialNeighborBaseIndex = 0;
     uint32_t lastReservoirIndex = 1;
     GPUTimer gpuTimers[2];
     gpuTimers[0].initialize(gpuEnv.cuContext);
@@ -1544,9 +1554,12 @@ int32_t main(int32_t argc, const char* argv[]) try {
             // EN: update the pipeline parameters.
             staticPlp.imageSize = int2(renderTargetSizeX, renderTargetSizeY);
             staticPlp.rngBuffer = rngBuffer.getBlockBuffer2D();
-            staticPlp.GBuffer0 = gBuffer0.getSurfaceObject(0);
-            staticPlp.GBuffer1 = gBuffer1.getSurfaceObject(0);
-            staticPlp.GBuffer2 = gBuffer2.getSurfaceObject(0);
+            staticPlp.GBuffer0[0] = gBuffer0[0].getSurfaceObject(0);
+            staticPlp.GBuffer0[1] = gBuffer0[1].getSurfaceObject(0);
+            staticPlp.GBuffer1[0] = gBuffer1[0].getSurfaceObject(0);
+            staticPlp.GBuffer1[1] = gBuffer1[1].getSurfaceObject(0);
+            staticPlp.GBuffer2[0] = gBuffer2[0].getSurfaceObject(0);
+            staticPlp.GBuffer2[1] = gBuffer2[1].getSurfaceObject(0);
             staticPlp.reservoirBuffer[0] = reservoirBuffer[0].getBlockBuffer2D();
             staticPlp.reservoirBuffer[1] = reservoirBuffer[1].getBlockBuffer2D();
             staticPlp.beautyAccumBuffer = beautyAccumBuffer.getSurfaceObject(0);
@@ -1671,12 +1684,12 @@ int32_t main(int32_t argc, const char* argv[]) try {
         bool lastFrameWasAnimated = false;
         static int32_t log2NumCandidateSamples = 4;
         static int32_t log2NumSamples = 0;
-        static bool enableTemporalReuse = false;
-        static bool enableSpatialReuse = false;
+        static bool enableTemporalReuse = true;
+        static bool enableSpatialReuse = true;
         static int32_t numSpatialReusePasses = 2;
         static int32_t numSpatialNeighbors = 5;
         static float spatialNeighborRadius = 20.0f;
-        static bool useLowDiscrepancySpatialNeighbors = false;
+        static bool useLowDiscrepancySpatialNeighbors = true;
         {
             ImGui::Begin("Debug", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
 
@@ -1841,6 +1854,7 @@ int32_t main(int32_t argc, const char* argv[]) try {
         perFramePlp.log2NumCandidateSamples = log2NumCandidateSamples;
         perFramePlp.numSpatialNeighbors = numSpatialNeighbors;
         perFramePlp.useLowDiscrepancyNeighbors = useLowDiscrepancySpatialNeighbors;
+        perFramePlp.bufferIndex = bufferIndex;
         perFramePlp.resetFlowBuffer = resetFlowBuffer;
 
         CUDADRV_CHECK(cuMemcpyHtoDAsync(perFramePlpOnDevice, &perFramePlp, sizeof(perFramePlp), cuStream));
@@ -1863,7 +1877,6 @@ int32_t main(int32_t argc, const char* argv[]) try {
         }
 
         if (enableSpatialReuse) {
-            static uint32_t lastSpatialNeighborBaseIndex = 0;
             gpuEnv.pipeline.setRayGenerationProgram(gpuEnv.combineSpatialNeighborsRayGenProgram);
             for (int i = 0; i < numSpatialReusePasses; ++i) {
                 plp.currentReservoirIndex = currentReservoirIndex;
@@ -1894,7 +1907,7 @@ int32_t main(int32_t argc, const char* argv[]) try {
                                   beautyAccumBuffer.getSurfaceObject(0),
                                   albedoAccumBuffer.getSurfaceObject(0),
                                   normalAccumBuffer.getSurfaceObject(0),
-                                  gBuffer2.getSurfaceObject(0),
+                                  gBuffer2[bufferIndex].getSurfaceObject(0),
                                   linearBeautyBuffer.getDevicePointer(),
                                   linearAlbedoBuffer.getDevicePointer(),
                                   linearNormalBuffer.getDevicePointer(),

@@ -319,9 +319,9 @@ namespace Shared {
         int2 imageSize;
         optixu::BlockBuffer2D<PCG32RNG, 1> rngBuffer;
 
-        optixu::NativeBlockBuffer2D<GBuffer0> GBuffer0;
-        optixu::NativeBlockBuffer2D<GBuffer1> GBuffer1;
-        optixu::NativeBlockBuffer2D<GBuffer2> GBuffer2;
+        optixu::NativeBlockBuffer2D<GBuffer0> GBuffer0[2];
+        optixu::NativeBlockBuffer2D<GBuffer1> GBuffer1[2];
+        optixu::NativeBlockBuffer2D<GBuffer2> GBuffer2[2];
 
         optixu::BlockBuffer2D<Reservoir<LightSample>, 1> reservoirBuffer[2];
         const float2* spatialNeighborDeltas;
@@ -352,6 +352,7 @@ namespace Shared {
         unsigned int log2NumCandidateSamples : 4;
         unsigned int numSpatialNeighbors : 4;
         unsigned int useLowDiscrepancyNeighbors : 1;
+        unsigned int bufferIndex : 1;
         unsigned int resetFlowBuffer : 1;
     };
     
