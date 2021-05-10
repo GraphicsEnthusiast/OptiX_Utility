@@ -756,16 +756,25 @@ CUDA_DEVICE_KERNEL void RT_RG_NAME(combineSpatialNeighbors)() {
             combinedReservoir = self;
         uint32_t combinedStreamLength = self.getStreamLength();
 
-        for (int nIdx = 0; nIdx < 5; ++nIdx) {
-            float radius = 20 * std::sqrt(rng.getFloat0cTo1o());
-            float angle = 2 * Pi * rng.getFloat0cTo1o();
-            float deltaX = radius * std::cos(angle);
-            float deltaY = radius * std::sin(angle);
+        for (int nIdx = 0; nIdx < plp.f->numSpatialNeighbors; ++nIdx) {
+            float radius = plp.f->spatialNeighborRadius;
+            float deltaX, deltaY;
+            if (plp.f->useLowDiscrepancyNeighbors) {
+                float2 delta = plp.s->spatialNeighborDeltas[(plp.spatialNeighborBaseIndex + nIdx) % 1024];
+                deltaX = radius * delta.x;
+                deltaY = radius * delta.y;
+            }
+            else {
+                radius *= std::sqrt(rng.getFloat0cTo1o());
+                float angle = 2 * Pi * rng.getFloat0cTo1o();
+                deltaX = radius * std::cos(angle);
+                deltaY = radius * std::sin(angle);
+            }
             int2 neighborIndex = make_int2(launchIndex.x + 0.5f + deltaX,
                                            launchIndex.y + 0.5f + deltaY);
             if (neighborIndex.x < 0 || neighborIndex.x >= plp.s->imageSize.x ||
                 neighborIndex.y < 0 || neighborIndex.y >= plp.s->imageSize.y ||
-                (deltaX == 0 && deltaY == 0))
+                (launchIndex.x == neighborIndex.x && launchIndex.y == neighborIndex.y))
                 continue;
 
             GBuffer0 nGBuffer0 = plp.s->GBuffer0.read(neighborIndex);

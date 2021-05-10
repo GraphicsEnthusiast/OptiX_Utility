@@ -324,6 +324,7 @@ namespace Shared {
         optixu::NativeBlockBuffer2D<GBuffer2> GBuffer2;
 
         optixu::BlockBuffer2D<Reservoir<LightSample>, 1> reservoirBuffer[2];
+        const float2* spatialNeighborDeltas;
 
         const MaterialData* materialDataBuffer;
         const GeometryInstanceData* geometryInstanceDataBuffer;
@@ -343,10 +344,14 @@ namespace Shared {
         PerspectiveCamera camera;
         PerspectiveCamera prevCamera;
 
+        float spatialNeighborRadius;
+
         int2 mousePosition;
         PickInfo* pickInfo;
 
-        unsigned int log2NumCandidateSamples : 8;
+        unsigned int log2NumCandidateSamples : 4;
+        unsigned int numSpatialNeighbors : 4;
+        unsigned int useLowDiscrepancyNeighbors : 1;
         unsigned int resetFlowBuffer : 1;
     };
     
@@ -354,6 +359,7 @@ namespace Shared {
         StaticPipelineLaunchParameters* s;
         PerFramePipelineLaunchParameters* f;
         unsigned int currentReservoirIndex : 1;
+        unsigned int spatialNeighborBaseIndex : 10;
     };
 
 

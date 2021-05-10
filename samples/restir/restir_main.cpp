@@ -1344,6 +1344,62 @@ int32_t main(int32_t argc, const char* argv[]) try {
 
 
 
+    const auto computeHaltonSequence = [](uint32_t base, uint32_t idx) {
+        const float recBase = 1.0f / base;
+        float ret = 0.0f;
+        float scale = 1.0f;
+        while (idx) {
+            scale *= recBase;
+            ret += (idx % base) * scale;
+            idx /= base;
+        }
+        return ret;
+    };
+    const auto concentricSampleDisk = [](float u0, float u1, float* dx, float* dy) {
+        float r, theta;
+        float sx = 2 * u0 - 1;
+        float sy = 2 * u1 - 1;
+
+        if (sx == 0 && sy == 0) {
+            *dx = 0;
+            *dy = 0;
+            return;
+        }
+        if (sx >= -sy) { // region 1 or 2
+            if (sx > sy) { // region 1
+                r = sx;
+                theta = sy / sx;
+            }
+            else { // region 2
+                r = sy;
+                theta = 2 - sx / sy;
+            }
+        }
+        else { // region 3 or 4
+            if (sx > sy) {/// region 4
+                r = -sy;
+                theta = 6 + sx / sy;
+            }
+            else {// region 3
+                r = -sx;
+                theta = 4 + sy / sx;
+            }
+        }
+        theta *= M_PI / 4;
+        *dx = r * cos(theta);
+        *dy = r * sin(theta);
+    };
+    std::vector<float2> spatialNeighborDeltasOnHost(1024);
+    for (int i = 0; i < spatialNeighborDeltasOnHost.size(); ++i) {
+        float2 delta;
+        concentricSampleDisk(computeHaltonSequence(2, i), computeHaltonSequence(3, i), &delta.x, &delta.y);
+        spatialNeighborDeltasOnHost[i] = delta;
+        //printf("%g, %g\n", delta.x, delta.y);
+    }
+    cudau::TypedBuffer<float2> spatialNeighborDeltas(gpuEnv.cuContext, GPUEnvironment::bufferType, spatialNeighborDeltasOnHost);
+
+
+
     Shared::StaticPipelineLaunchParameters staticPlp = {};
     staticPlp.imageSize = int2(renderTargetSizeX, renderTargetSizeY);
     staticPlp.rngBuffer = rngBuffer.getBlockBuffer2D();
@@ -1352,6 +1408,7 @@ int32_t main(int32_t argc, const char* argv[]) try {
     staticPlp.GBuffer2 = gBuffer2.getSurfaceObject(0);
     staticPlp.reservoirBuffer[0] = reservoirBuffer[0].getBlockBuffer2D();
     staticPlp.reservoirBuffer[1] = reservoirBuffer[1].getBlockBuffer2D();
+    staticPlp.spatialNeighborDeltas = spatialNeighborDeltas.getDevicePointer();
     staticPlp.materialDataBuffer = gpuEnv.materialDataBuffer.getDevicePointer();
     staticPlp.geometryInstanceDataBuffer = gpuEnv.geomInstDataBuffer.getDevicePointer();
     lightInstDist.getDeviceType(&staticPlp.lightInstDist);
@@ -1617,6 +1674,9 @@ int32_t main(int32_t argc, const char* argv[]) try {
         static bool enableTemporalReuse = false;
         static bool enableSpatialReuse = false;
         static int32_t numSpatialReusePasses = 2;
+        static int32_t numSpatialNeighbors = 5;
+        static float spatialNeighborRadius = 20.0f;
+        static bool useLowDiscrepancySpatialNeighbors = false;
         {
             ImGui::Begin("Debug", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
 
@@ -1674,6 +1734,11 @@ int32_t main(int32_t argc, const char* argv[]) try {
             ImGui::Checkbox("Temporal Reuse", &enableTemporalReuse);
             ImGui::Checkbox("Spatial Reuse", &enableSpatialReuse);
             ImGui::SliderInt("#Spatial Reuse Passes", &numSpatialReusePasses, 1, 5);
+            ImGui::SliderInt("#Spatial Neighbors", &numSpatialNeighbors, 1, 10);
+            ImGui::SliderFloat("Radius", &spatialNeighborRadius, 3.0f, 30.0f);
+            ImGui::Checkbox("Low Discrepancy", &useLowDiscrepancySpatialNeighbors);
+
+            ImGui::Separator();
 
             if (ImGui::Checkbox("Temporal Denoiser", &useTemporalDenosier)) {
                 CUDADRV_CHECK(cuStreamSynchronize(cuStream));
@@ -1768,11 +1833,14 @@ int32_t main(int32_t argc, const char* argv[]) try {
         else
             ++numAccumFrames;
         perFramePlp.numAccumFrames = numAccumFrames;
-        perFramePlp.log2NumCandidateSamples = log2NumCandidateSamples;
         perFramePlp.instanceDataBuffer = gpuEnv.instDataBuffer[bufferIndex].getDevicePointer();
-        perFramePlp.pickInfo = pickInfos[bufferIndex].getDevicePointer();
+        perFramePlp.spatialNeighborRadius = spatialNeighborRadius;
         perFramePlp.mousePosition = int2(static_cast<int32_t>(g_mouseX),
                                          static_cast<int32_t>(g_mouseY));
+        perFramePlp.pickInfo = pickInfos[bufferIndex].getDevicePointer();
+        perFramePlp.log2NumCandidateSamples = log2NumCandidateSamples;
+        perFramePlp.numSpatialNeighbors = numSpatialNeighbors;
+        perFramePlp.useLowDiscrepancyNeighbors = useLowDiscrepancySpatialNeighbors;
         perFramePlp.resetFlowBuffer = resetFlowBuffer;
 
         CUDADRV_CHECK(cuMemcpyHtoDAsync(perFramePlpOnDevice, &perFramePlp, sizeof(perFramePlp), cuStream));
@@ -1795,14 +1863,17 @@ int32_t main(int32_t argc, const char* argv[]) try {
         }
 
         if (enableSpatialReuse) {
+            static uint32_t lastSpatialNeighborBaseIndex = 0;
             gpuEnv.pipeline.setRayGenerationProgram(gpuEnv.combineSpatialNeighborsRayGenProgram);
             for (int i = 0; i < numSpatialReusePasses; ++i) {
                 plp.currentReservoirIndex = currentReservoirIndex;
+                plp.spatialNeighborBaseIndex = lastSpatialNeighborBaseIndex + numSpatialNeighbors * i;
                 CUDADRV_CHECK(cuMemcpyHtoDAsync(plpOnDevice, &plp, sizeof(plp), cuStream));
                 gpuEnv.pipeline.launch(cuStream, plpOnDevice, renderTargetSizeX, renderTargetSizeY, 1);
                 currentReservoirIndex = (currentReservoirIndex + 1) % 2;
                 CUDADRV_CHECK(cuStreamSynchronize(cuStream));
             }
+            lastSpatialNeighborBaseIndex += numSpatialNeighbors * numSpatialReusePasses;
         }
 
         plp.currentReservoirIndex = currentReservoirIndex;
@@ -1960,6 +2031,8 @@ int32_t main(int32_t argc, const char* argv[]) try {
 
     CUDADRV_CHECK(cuMemFree(perFramePlpOnDevice));
     CUDADRV_CHECK(cuMemFree(staticPlpOnDevice));
+
+    spatialNeighborDeltas.finalize();
 
     drawOptiXResultShader.finalize();
     vertexArrayForFullScreen.finalize();
