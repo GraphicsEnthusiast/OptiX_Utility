@@ -236,14 +236,16 @@ namespace Shared {
     class Reservoir {
         SampleType m_sample;
         FloatSum m_sumWeights;
-        uint32_t m_numSamples;
+        uint32_t m_streamLength;
         float m_targetDensityValue;
         float m_recPDFValue;
 
     public:
         CUDA_DEVICE_FUNCTION void initialize() {
             m_sumWeights = 0;
-            m_numSamples = 0;
+            m_streamLength = 0;
+            m_targetDensityValue = 0;
+            m_recPDFValue = 0;
         }
         CUDA_DEVICE_FUNCTION void update(const SampleType &newSample, float targetDensity, float weight, float u) {
             m_sumWeights += weight;
@@ -251,7 +253,7 @@ namespace Shared {
                 m_sample = newSample;
                 m_targetDensityValue = targetDensity;
             }
-            ++m_numSamples;
+            ++m_streamLength;
         }
 
         CUDA_DEVICE_FUNCTION LightSample getSample() const {
@@ -260,15 +262,15 @@ namespace Shared {
         CUDA_DEVICE_FUNCTION float getSumWeights() const {
             return m_sumWeights;
         }
-        CUDA_DEVICE_FUNCTION uint32_t getNumSamples() const {
-            return m_numSamples;
+        CUDA_DEVICE_FUNCTION uint32_t getStreamLength() const {
+            return m_streamLength;
         }
-        CUDA_DEVICE_FUNCTION void setNumSamples(uint32_t numSamples) {
-            m_numSamples = numSamples;
+        CUDA_DEVICE_FUNCTION void setStreamLength(uint32_t length) {
+            m_streamLength = length;
         }
 
         CUDA_DEVICE_FUNCTION void calcRecPDFValue() {
-            m_recPDFValue = m_sumWeights / (m_targetDensityValue * m_numSamples);
+            m_recPDFValue = m_sumWeights / (m_targetDensityValue * m_streamLength);
             if (!isfinite(m_recPDFValue))
                 m_recPDFValue = 0;
         }
@@ -321,6 +323,8 @@ namespace Shared {
         optixu::NativeBlockBuffer2D<GBuffer1> GBuffer1;
         optixu::NativeBlockBuffer2D<GBuffer2> GBuffer2;
 
+        optixu::BlockBuffer2D<Reservoir<LightSample>, 1> reservoirBuffer[2];
+
         const MaterialData* materialDataBuffer;
         const GeometryInstanceData* geometryInstanceDataBuffer;
         DiscreteDistribution1D lightInstDist;
@@ -333,8 +337,6 @@ namespace Shared {
     struct PerFramePipelineLaunchParameters {
         OptixTraversableHandle travHandle;
         uint32_t numAccumFrames;
-
-        optixu::BlockBuffer2D<Reservoir<LightSample>, 1> reservoirBuffer[2];
 
         const InstanceData* instanceDataBuffer;
 
