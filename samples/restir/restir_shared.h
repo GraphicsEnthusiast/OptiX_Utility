@@ -180,7 +180,8 @@ namespace Shared {
                 CUtexObject smoothness;
             } asDiffuseAndSpecular;
         };
-        float3 emittance;
+        CUtexObject emittance;
+        float3 emittanceScale;
 
         SetupBSDF setupBSDF;
         GetBaseColor getBaseColor;

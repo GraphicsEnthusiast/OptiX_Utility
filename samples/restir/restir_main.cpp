@@ -94,7 +94,7 @@ enum CallableProgram {
 struct GPUEnvironment {
     static constexpr cudau::BufferType bufferType = cudau::BufferType::Device;
     static constexpr uint32_t maxNumMaterials = 1024;
-    static constexpr uint32_t maxNumGeometryInstances = 8192;
+    static constexpr uint32_t maxNumGeometryInstances = 65536;
     static constexpr uint32_t maxNumInstances = 8192;
 
     CUcontext cuContext;
@@ -348,7 +348,9 @@ struct Material {
     std::variant<Lambert, DiffuseAndSpecular> body;
     cudau::Array normal;
     CUtexObject texNormal;
-    float3 emittance;
+    cudau::Array emittance;
+    CUtexObject texEmittance;
+    float3 emittanceScale;
     uint32_t materialSlot;
 
     Material() {}
@@ -407,7 +409,7 @@ void computeFlattenedNodes(const aiScene* scene, const Matrix4x4 &parentXfm, con
 Material* createLambertMaterial(
     GPUEnvironment &gpuEnv,
     const std::filesystem::path &reflectancePath, const float3 &immReflectance,
-    const float3 &emittance) {
+    const std::filesystem::path &emittancePath, const float3 &emittanceScale) {
     Shared::MaterialData* matDataOnHost = gpuEnv.materialDataBuffer.getMappedPointer();
 
     cudau::TextureSampler sampler_sRGB;
@@ -441,8 +443,10 @@ Material* createLambertMaterial(
     }
     else {
         int32_t width, height, n;
+        hpprintf("Reading: %s ... ", reflectancePath.string().c_str());
         uint8_t* linearImageData = stbi_load(reflectancePath.string().c_str(),
                                              &width, &height, &n, 4);
+        hpprintf("done.\n");
         body.reflectance.initialize2D(
             gpuEnv.cuContext, cudau::ArrayElementType::UInt8, 4,
             cudau::ArraySurface::Disable, cudau::ArrayTextureGather::Disable,
@@ -452,14 +456,32 @@ Material* createLambertMaterial(
     }
     body.texReflectance = sampler_sRGB.createTextureObject(body.reflectance);
 
-    mat->emittance = emittance;
+    if (emittancePath.empty()) {
+        mat->texEmittance = 0;
+    }
+    else {
+        int32_t width, height, n;
+        hpprintf("Reading: %s ... ", emittancePath.string().c_str());
+        uint8_t* linearImageData = stbi_load(emittancePath.string().c_str(),
+                                             &width, &height, &n, 4);
+        hpprintf("done.\n");
+        mat->emittance.initialize2D(
+            gpuEnv.cuContext, cudau::ArrayElementType::UInt8, 4,
+            cudau::ArraySurface::Disable, cudau::ArrayTextureGather::Disable,
+            width, height, 1);
+        mat->emittance.write<uint8_t>(linearImageData, width * height * 4);
+        stbi_image_free(linearImageData);
+        mat->texEmittance = sampler_sRGB.createTextureObject(mat->emittance);
+    }
+    mat->emittanceScale = emittanceScale;
 
     mat->materialSlot = gpuEnv.materialSlotFinder.getFirstAvailableSlot();
     gpuEnv.materialSlotFinder.setInUse(mat->materialSlot);
 
     Shared::MaterialData matData = {};
     matData.asLambert.reflectance = body.texReflectance;
-    matData.emittance = mat->emittance;
+    matData.emittance = mat->texEmittance;
+    matData.emittanceScale = mat->emittanceScale;
     matData.setupBSDF = Shared::SetupBSDF(CallableProgram_SetupLambertBRDF);
     matData.getBaseColor = Shared::GetBaseColor(CallableProgram_LambertBRDF_getBaseColor);
     matData.evaluateBSDF = Shared::EvaluateBSDF(CallableProgram_LambertBRDF_evaluate);
@@ -476,10 +498,10 @@ GeometryInstance* createGeometryInstance(
     Shared::GeometryInstanceData* geomInstDataOnHost = gpuEnv.geomInstDataBuffer.getMappedPointer();
 
     std::vector<float> emitterImportances(triangles.size());
-    float lumEmittance = Shared::convertToWeight(mat->emittance);
+    float lumEmittance = Shared::convertToWeight(mat->emittanceScale);
     for (int triIdx = 0; triIdx < emitterImportances.size(); ++triIdx) {
         const Shared::Triangle &tri = triangles[triIdx];
-        const Shared::Vertex(&vs)[3] = {
+        const Shared::Vertex (&vs)[3] = {
             vertices[tri.index0],
             vertices[tri.index1],
             vertices[tri.index2],
@@ -577,7 +599,7 @@ Instance* createInstance(
 }
 
 void createTriangleMeshes(const std::filesystem::path &filePath,
-                          const Matrix4x4 &rootTransform,
+                          const Matrix4x4 &preTransform,
                           GPUEnvironment &gpuEnv,
                           std::vector<Material*> &materials,
                           std::vector<GeometryInstance*> &geomInsts,
@@ -594,7 +616,7 @@ void createTriangleMeshes(const std::filesystem::path &filePath,
         hpprintf("Failed to load %s.\n", filePath.string().c_str());
         return;
     }
-    hpprintf("done.\n", filePath.string().c_str());
+    hpprintf("done.\n");
 
     std::filesystem::path dirPath = filePath;
     dirPath.remove_filename();
@@ -604,11 +626,16 @@ void createTriangleMeshes(const std::filesystem::path &filePath,
     for (int matIdx = 0; matIdx < scene->mNumMaterials; ++matIdx) {
         std::filesystem::path reflectancePath;
         float3 immReflectance;
-        float3 immEmittance;
+        std::filesystem::path emittancePath;
+        float3 emittanceScale;
 
         const aiMaterial* aiMat = scene->mMaterials[matIdx];
         aiString strValue;
         float color[3];
+
+        std::string matName;
+        if (aiMat->Get(AI_MATKEY_NAME, strValue) == aiReturn_SUCCESS)
+            matName = strValue.C_Str();
 
         if (aiMat->Get(AI_MATKEY_TEXTURE_DIFFUSE(0), strValue) == aiReturn_SUCCESS) {
             reflectancePath = dirPath / strValue.C_Str();
@@ -622,13 +649,47 @@ void createTriangleMeshes(const std::filesystem::path &filePath,
             immReflectance = float3(color[0], color[1], color[2]);
         }
 
-        if (aiMat->Get(AI_MATKEY_COLOR_EMISSIVE, color, nullptr) == aiReturn_SUCCESS)
-            immEmittance = float3(color[0], color[1], color[2]);
+        if (aiMat->Get(AI_MATKEY_TEXTURE_EMISSIVE(0), strValue) == aiReturn_SUCCESS) {
+            printf("");
+        }
+        else if (aiMat->Get(AI_MATKEY_COLOR_EMISSIVE, color, nullptr) == aiReturn_SUCCESS) {
+            emittanceScale = float3(color[0], color[1], color[2]);
+        }
+        else {
+            emittanceScale = float3(0.0f);
+        }
 
-        materials.push_back(createLambertMaterial(gpuEnv, reflectancePath, immReflectance, immEmittance));
+        float emitScale = 10;
+        if (matName == "Paris_StringLights_01_White_Color") {
+            emittanceScale = emitScale * float3(20, 20, 20);
+        }
+        else if (matName == "Paris_StringLights_01_Green_Color") {
+            emittanceScale = emitScale * float3(0, 50, 0);
+        }
+        else if (matName == "Paris_StringLights_01_Red_Color") {
+            emittanceScale = emitScale * float3(50, 0, 0);
+        }
+        if (matName == "Paris_StringLights_01_Blue_Color") {
+            emittanceScale = emitScale * float3(0, 0, 50);
+        }
+        else if (matName == "Paris_StringLights_01_Pink_Color") {
+            emittanceScale = emitScale * float3(30, 10, 10);
+        }
+        else if (matName == "Paris_StringLights_01_Orange_Color") {
+            emittanceScale = emitScale * float3(35, 15, 0);
+        }
+        else if (matName == "Streetlight_Glass") {
+            emittanceScale = emitScale * float3(35, 30, 20);
+        }
+
+        materials.push_back(createLambertMaterial(
+            gpuEnv,
+            reflectancePath, immReflectance,
+            emittancePath, emittanceScale));
     }
 
     geomInsts.clear();
+    Matrix3x3 preNormalTransform = transpose(inverse(preTransform.getUpperLeftMatrix()));
     for (int meshIdx = 0; meshIdx < scene->mNumMeshes; ++meshIdx) {
         const aiMesh* aiMesh = scene->mMeshes[meshIdx];
 
@@ -636,11 +697,13 @@ void createTriangleMeshes(const std::filesystem::path &filePath,
         for (int vIdx = 0; vIdx < vertices.size(); ++vIdx) {
             const aiVector3D &aip = aiMesh->mVertices[vIdx];
             const aiVector3D &ain = aiMesh->mNormals[vIdx];
-            const aiVector3D &ait = aiMesh->mTextureCoords[0][vIdx];
+            const aiVector3D ait = aiMesh->mTextureCoords[0] ?
+                aiMesh->mTextureCoords[0][vIdx] :
+                aiVector3D(0.0f, 0.0f, 0.0f);
 
             Shared::Vertex v;
-            v.position = float3(aip.x, aip.y, aip.z);
-            v.normal = float3(ain.x, ain.y, ain.z);
+            v.position = preTransform * float3(aip.x, aip.y, aip.z);
+            v.normal = preNormalTransform * float3(ain.x, ain.y, ain.z);
             v.texCoord = float2(ait.x, ait.y);
             vertices[vIdx] = v;
         }
@@ -660,7 +723,7 @@ void createTriangleMeshes(const std::filesystem::path &filePath,
     }
 
     std::vector<FlattenedNode> flattenedNodes;
-    computeFlattenedNodes(scene, rootTransform, scene->mRootNode, flattenedNodes);
+    computeFlattenedNodes(scene, Matrix4x4(), scene->mRootNode, flattenedNodes);
 
     geomGroups.clear();
     insts.clear();
@@ -687,14 +750,17 @@ void createTriangleMeshes(const std::filesystem::path &filePath,
     }
 }
 
-void createRectangleLight(float width, float depth, const float3 &emittance,
+void createRectangleLight(float width, float depth,
+                          const float3 &reflectance,
+                          const std::filesystem::path &emittancePath,
+                          const float3 &emittanceScale,
                           const Matrix4x4 &transform,
                           GPUEnvironment &gpuEnv,
                           Material** material,
                           GeometryInstance** geomInst,
                           GeometryGroup** geomGroup,
                           Instance** inst) {
-    *material = createLambertMaterial(gpuEnv, "", float3(0.8f), emittance);
+    *material = createLambertMaterial(gpuEnv, "", reflectance, emittancePath, emittanceScale);
 
     std::vector<Shared::Vertex> vertices = {
         Shared::Vertex{float3(-0.5f * width, 0.0f, -0.5f * depth), float3(0, -1, 0), float2(0.0f, 1.0f)},
@@ -714,14 +780,16 @@ void createRectangleLight(float width, float depth, const float3 &emittance,
     *inst = createInstance(gpuEnv, *geomGroup, transform);
 }
 
-void createSphereLight(float radius, const float3 &emittance,
+void createSphereLight(float radius,
+                       const std::filesystem::path &emittancePath,
+                       const float3 &emittanceScale,
                        const float3 &position,
                        GPUEnvironment &gpuEnv,
                        Material** material,
                        GeometryInstance** geomInst,
                        GeometryGroup** geomGroup,
                        Instance** inst) {
-    *material = createLambertMaterial(gpuEnv, "", float3(0.8f), emittance);
+    *material = createLambertMaterial(gpuEnv, "", float3(0.8f), emittancePath, emittanceScale);
 
     constexpr uint32_t numZenithSegments = 8;
     constexpr uint32_t numAzimuthSegments = 16;
@@ -736,6 +804,7 @@ void createSphereLight(float radius, const float3 &emittance,
     vertices[vIdx++] = Shared::Vertex{ float3(0, radius, 0), float3(0, 1, 0), float2(0, 0) };
     {
         float zenith = zenithDelta;
+        float2 texCoord = float2(0, zenith / M_PI);
         for (int aIdx = 0; aIdx < numAzimuthSegments; ++aIdx) {
             float azimuth = aIdx * azimushDelta;
             float3 n = float3(std::cos(azimuth) * std::sin(zenith),
@@ -744,19 +813,22 @@ void createSphereLight(float radius, const float3 &emittance,
             uint32_t lrIdx = 1 + aIdx;
             uint32_t llIdx = 1 + (aIdx + 1) % numAzimuthSegments;
             uint32_t uIdx = 0;
-            vertices[vIdx++] = Shared::Vertex{ radius * n, n, float2(0, 0) };
+            texCoord.x = azimuth / (2 * M_PI);
+            vertices[vIdx++] = Shared::Vertex{ radius * n, n, texCoord };
             triangles[triIdx++] = Shared::Triangle{ llIdx, lrIdx, uIdx };
         }
     }
     for (int zIdx = 1; zIdx < numZenithSegments - 1; ++zIdx) {
         float zenith = (zIdx + 1) * zenithDelta;
+        float2 texCoord = float2(0, zenith / M_PI);
         uint32_t baseVIdx = vIdx;
         for (int aIdx = 0; aIdx < numAzimuthSegments; ++aIdx) {
             float azimuth = aIdx * azimushDelta;
             float3 n = float3(std::cos(azimuth) * std::sin(zenith),
                               std::cos(zenith),
                               std::sin(azimuth) * std::sin(zenith));
-            vertices[vIdx++] = Shared::Vertex{ radius * n, n, float2(0, 0) };
+            texCoord.x = azimuth / (2 * M_PI);
+            vertices[vIdx++] = Shared::Vertex{ radius * n, n, texCoord };
             uint32_t lrIdx = baseVIdx + aIdx;
             uint32_t llIdx = baseVIdx + (aIdx + 1) % numAzimuthSegments;
             uint32_t ulIdx = baseVIdx - numAzimuthSegments + (aIdx + 1) % numAzimuthSegments;
@@ -765,7 +837,7 @@ void createSphereLight(float radius, const float3 &emittance,
             triangles[triIdx++] = Shared::Triangle{ llIdx, urIdx, ulIdx };
         }
     }
-    vertices[vIdx++] = Shared::Vertex{ float3(0, -radius, 0), float3(0, -1, 0), float2(0, 0) };
+    vertices[vIdx++] = Shared::Vertex{ float3(0, -radius, 0), float3(0, -1, 0), float2(0, 1) };
     {
         for (int aIdx = 0; aIdx < numAzimuthSegments; ++aIdx) {
             uint32_t lIdx = numVertices - 1;
@@ -993,14 +1065,64 @@ int32_t main(int32_t argc, const char* argv[]) try {
         }
                        });
 
-    g_cameraPositionalMovingSpeed = 0.01f;
-    g_cameraDirectionalMovingSpeed = 0.0015f;
-    g_cameraTiltSpeed = 0.025f;
-    g_cameraPosition = float3(-6.4f, 3, 0);
-    g_cameraOrientation = qRotateY(M_PI / 2);
-
     // END: Set up input callbacks.
     // ----------------------------------------------------------------
+
+
+
+    struct InstanceController {
+        Instance* inst;
+
+        float curScale;
+        Quaternion curOrientation;
+        float3 curPosition;
+        Matrix4x4 prevMatM2W;
+        Matrix4x4 matM2W;
+        Matrix3x3 nMatM2W;
+
+        float beginScale;
+        Quaternion beginOrientation;
+        float3 beginPosition;
+        float endScale;
+        Quaternion endOrientation;
+        float3 endPosition;
+        float time;
+        float frequency;
+
+        InstanceController(
+            Instance* _inst,
+            float _beginScale, const Quaternion &_beginOrienatation, const float3 &_beginPosition,
+            float _endScale, const Quaternion &_endOrienatation, const float3 &_endPosition,
+            float _frequency) :
+            inst(_inst),
+            beginScale(_beginScale), beginOrientation(_beginOrienatation), beginPosition(_beginPosition),
+            endScale(_endScale), endOrientation(_endOrienatation), endPosition(_endPosition),
+            time(0), frequency(_frequency) {
+        }
+
+        void updateBody(float dt) {
+            time = std::fmod(time + dt, frequency);
+            float t = 0.5f - 0.5f * std::cos(2 * M_PI * time / frequency);
+            curScale = (1 - t) * beginScale + t * endScale;
+            curOrientation = Slerp(t, beginOrientation, endOrientation);
+            curPosition = (1 - t) * beginPosition + t * endPosition;
+        }
+
+        void update(Shared::InstanceData* instDataBuffer, float dt) {
+            prevMatM2W = matM2W;
+            updateBody(dt);
+            matM2W = Matrix4x4(curOrientation.toMatrix3x3() * scale3x3(curScale), curPosition);
+            nMatM2W = transpose(inverse(matM2W.getUpperLeftMatrix()));
+
+            Matrix4x4 tMatM2W = transpose(matM2W);
+            inst->optixInst.setTransform(reinterpret_cast<const float*>(&tMatM2W));
+
+            Shared::InstanceData &instData = instDataBuffer[inst->instSlot];
+            instData.prevTransform = prevMatM2W;
+            instData.transform = matM2W;
+            instData.normalMatrix = nMatM2W;
+        }
+    };
 
 
 
@@ -1018,10 +1140,17 @@ int32_t main(int32_t argc, const char* argv[]) try {
     gpuEnv.geomInstDataBuffer.map();
     gpuEnv.instDataBuffer[0].map();
 
+    g_cameraPositionalMovingSpeed = 0.05f;
+    g_cameraDirectionalMovingSpeed = 0.0015f;
+    g_cameraTiltSpeed = 0.025f;
+
     std::vector<Material*> materials;
     std::vector<GeometryInstance*> geomInsts;
     std::vector<GeometryGroup*> geomGroups;
     std::vector<Instance*> insts;
+
+    std::vector<InstanceController*> instControllers;
+
     {
         std::vector<Material*> tempMaterials;
         std::vector<GeometryInstance*> tempGeomInsts;
@@ -1051,6 +1180,7 @@ int32_t main(int32_t argc, const char* argv[]) try {
             GeometryGroup* tempGeomGroup;
             Instance* tempInst;
             createSphereLight(0.05f + 0.5f * std::pow(u01(rng), 2.0f),
+                              "",
                               HSVtoRGB(u01(rng), 0.5f + 0.5f * u01(rng), 1) * (20 + 40 * u01(rng)),
                               float3(12 * 2 * (u01(rng) - 0.5f),
                                      3.5f + 3 * 2 * (u01(rng) - 0.5f),
@@ -1067,6 +1197,73 @@ int32_t main(int32_t argc, const char* argv[]) try {
             insts.push_back(tempInst);
         }
     }
+
+    {
+        Material* tempMat;
+        GeometryInstance* tempGeomInst;
+        GeometryGroup* tempGeomGroup;
+        Instance* tempInst;
+        createRectangleLight(1.0f, 1.0f,
+                             float3(0.01f),
+                             "../../data/xy_color_diagram.png", float3(500.0f), Matrix4x4(),
+                             gpuEnv, &tempMat, &tempGeomInst, &tempGeomGroup, &tempInst);
+        materials.push_back(tempMat);
+        geomInsts.push_back(tempGeomInst);
+        geomGroups.push_back(tempGeomGroup);
+        insts.push_back(tempInst);
+
+        auto controller = new InstanceController(
+            tempInst,
+            1.0f, qRotateY(-M_PI * 0.5f) * qRotateX(-M_PI / 2), float3(3.0f, 2, 0),
+            1.0f, qRotateY(-M_PI * 0.5f) * qRotateX(-M_PI / 2), float3(-3.0f, 2, 0),
+            5.0f);
+        instControllers.push_back(controller);
+    }
+
+    g_cameraPosition = float3(-6.4f, 3, 0);
+    g_cameraOrientation = qRotateY(M_PI / 2);
+
+    //{
+    //    std::vector<Material*> tempMaterials;
+    //    std::vector<GeometryInstance*> tempGeomInsts;
+    //    std::vector<GeometryGroup*> tempGeomGroups;
+    //    std::vector<Instance*> tempInsts;
+    //    createTriangleMeshes("../../../assets/Amazon_Bistro/Exterior/exterior.obj",
+    //                         scale4x4(0.001f),
+    //                         gpuEnv,
+    //                         tempMaterials,
+    //                         tempGeomInsts,
+    //                         tempGeomGroups,
+    //                         tempInsts);
+
+    //    materials.insert(materials.end(), tempMaterials.begin(), tempMaterials.end());
+    //    geomInsts.insert(geomInsts.end(), tempGeomInsts.begin(), tempGeomInsts.end());
+    //    geomGroups.insert(geomGroups.end(), tempGeomGroups.begin(), tempGeomGroups.end());
+    //    insts.insert(insts.end(), tempInsts.begin(), tempInsts.end());
+    //}
+
+    //{
+    //    Material* tempMat;
+    //    GeometryInstance* tempGeomInst;
+    //    GeometryGroup* tempGeomGroup;
+    //    Instance* tempInst;
+    //    createRectangleLight(0.1f, 0.1f, "../../data/xy_color_diagram.png", float3(500.0f), Matrix4x4(),
+    //                         gpuEnv, &tempMat, &tempGeomInst, &tempGeomGroup, &tempInst);
+    //    materials.push_back(tempMat);
+    //    geomInsts.push_back(tempGeomInst);
+    //    geomGroups.push_back(tempGeomGroup);
+    //    insts.push_back(tempInst);
+
+    //    auto controller = new InstanceController(
+    //        tempInst,
+    //        1.0f, qRotateX(M_PI * 0.2f) * qRotateY(-M_PI * 0.3f) * qRotateX(-M_PI / 2), float3(0.362f, 0.329f, -2.0f),
+    //        1.0f, qRotateX(-M_PI * 0.2f) * qRotateY(M_PI * 0.3f) * qRotateX(-M_PI / 2), float3(-0.719f, 0.329f, -0.442f),
+    //        5.0f);
+    //    instControllers.push_back(controller);
+    //}
+
+    //g_cameraPosition = float3(-0.753442f, 0.140257f, -0.056083f);
+    //g_cameraOrientation = Quaternion(-0.009145f, 0.531434f, -0.005825f, 0.847030f);
 
     gpuEnv.instDataBuffer[0].unmap();
     gpuEnv.geomInstDataBuffer.unmap();
@@ -1814,17 +2011,22 @@ int32_t main(int32_t argc, const char* argv[]) try {
 
         curGPUTimer.frame.start(cuStream);
 
-        //// JP: 各インスタンスのトランスフォームを更新する。
-        //// EN: Update the transform of each instance.
-        //if (animate || lastFrameWasAnimated) {
-        //    for (int i = 0; i < bunnyInsts.size(); ++i) {
-        //        MovingInstance &bunnyInst = bunnyInsts[i];
-        //        bunnyInst.update(animate ? 1.0f / 60.0f : 0.0f);
-        //        // TODO: まとめて送る。
-        //        CUDADRV_CHECK(cuMemcpyHtoDAsync(instDataBuffer.getCUdeviceptrAt(bunnyInst.ID),
-        //                                        &bunnyInst.instData, sizeof(bunnyInsts[i].instData), cuStream));
-        //    }
-        //}
+        // JP: 各インスタンスのトランスフォームを更新する。
+        // EN: Update the transform of each instance.
+        if (animate || lastFrameWasAnimated) {
+            cudau::TypedBuffer<Shared::InstanceData> &curInstDataBuffer = gpuEnv.instDataBuffer[bufferIndex];
+            Shared::InstanceData* instDataBufferOnHost = curInstDataBuffer.map();
+            for (int i = 0; i < instControllers.size(); ++i) {
+                InstanceController* controller = instControllers[i];
+                Instance* inst = controller->inst;
+                Shared::InstanceData &instData = instDataBufferOnHost[inst->instSlot];
+                controller->update(instDataBufferOnHost, animate ? 1.0f / 60.0f : 0.0f);
+                // TODO: まとめて送る。
+                CUDADRV_CHECK(cuMemcpyHtoDAsync(curInstDataBuffer.getCUdeviceptrAt(inst->instSlot),
+                                                &instData, sizeof(instData), cuStream));
+            }
+            curInstDataBuffer.unmap();
+        }
 
         // JP: IASのリビルドを行う。
         //     アップデートの代用としてのリビルドでは、インスタンスの追加・削除や

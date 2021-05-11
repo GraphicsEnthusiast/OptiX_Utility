@@ -362,6 +362,12 @@ CUDA_DEVICE_FUNCTION float3 operator*(float s, const float3 &v) {
 CUDA_DEVICE_FUNCTION float3 operator*(const float3 &v, float s) {
     return make_float3(s * v.x, s * v.y, s * v.z);
 }
+CUDA_DEVICE_FUNCTION float3 &operator*=(float3 &v0, const float3 &v1) {
+    v0.x *= v1.x;
+    v0.y *= v1.y;
+    v0.z *= v1.z;
+    return v0;
+}
 CUDA_DEVICE_FUNCTION float3 &operator*=(float3 &v, float s) {
     v.x *= s;
     v.y *= s;
@@ -388,6 +394,9 @@ CUDA_DEVICE_FUNCTION bool allFinite(const float3 &v) {
 
 CUDA_DEVICE_FUNCTION float4 make_float4(float v) {
     return make_float4(v, v, v, v);
+}
+CUDA_DEVICE_FUNCTION float4 make_float4(const float3 &v) {
+    return make_float4(v.x, v.y, v.z, 0.0f);
 }
 CUDA_DEVICE_FUNCTION float4 make_float4(const float3 &v, float w) {
     return make_float4(v.x, v.y, v.z, w);
@@ -740,6 +749,9 @@ struct Matrix4x4 {
     CUDA_DEVICE_FUNCTION constexpr Matrix4x4(const float4 &col0, const float4 &col1, const float4 &col2, const float4 &col3) :
         c0(col0), c1(col1), c2(col2), c3(col3)
     { }
+    CUDA_DEVICE_FUNCTION Matrix4x4(const Matrix3x3 &mat3x3, const float3 &position) :
+        c0(make_float4(mat3x3.c0)), c1(make_float4(mat3x3.c1)), c2(make_float4(mat3x3.c2)), c3(make_float4(position, 1.0f))
+    { }
 
     CUDA_DEVICE_FUNCTION Matrix4x4 operator+() const {
         return *this;
@@ -933,6 +945,12 @@ struct Quaternion {
     CUDA_DEVICE_FUNCTION Quaternion operator+() const { return *this; }
     CUDA_DEVICE_FUNCTION Quaternion operator-() const { return Quaternion(-v, -w); }
 
+    CUDA_DEVICE_FUNCTION Quaternion operator+(const Quaternion &q) const {
+        return Quaternion(v + q.v, w + q.w);
+    }
+    CUDA_DEVICE_FUNCTION Quaternion operator-(const Quaternion &q) const {
+        return Quaternion(v - q.v, w - q.w);
+    }
     CUDA_DEVICE_FUNCTION Quaternion operator*(const Quaternion &q) const {
         return Quaternion(cross(v, q.v) + w * q.v + q.w * v, w * q.w - dot(v, q.v));
     }
@@ -965,6 +983,14 @@ struct Quaternion {
     }
 };
 
+CUDA_DEVICE_FUNCTION float dot(const Quaternion &q0, const Quaternion &q1) {
+    return dot(q0.v, q1.v) + q0.w * q1.w;
+}
+
+CUDA_DEVICE_FUNCTION Quaternion normalize(const Quaternion &q) {
+    return q / std::sqrt(dot(q, q));
+}
+
 CUDA_DEVICE_FUNCTION static Quaternion qRotate(float angle, const float3 &axis) {
     float ha = angle / 2;
     float s = std::sin(ha), c = std::cos(ha);
@@ -979,6 +1005,22 @@ CUDA_DEVICE_FUNCTION static Quaternion qRotateZ(float angle) { return qRotate(an
 
 CUDA_DEVICE_FUNCTION Quaternion qFromEulerAngles(float roll, float pitch, float yaw) {
     return qRotateZ(roll) * qRotateY(yaw) * qRotateX(pitch);
+}
+
+CUDA_DEVICE_FUNCTION Quaternion Slerp(float t, const Quaternion &q0, const Quaternion &q1) {
+    float cosTheta = dot(q0, q1);
+    if (cosTheta > 0.9995f)
+        return normalize((1 - t) * q0 + t * q1);
+    else {
+        float theta = std::acos(std::fmin(std::fmax(cosTheta, -1.0f), 1.0f));
+        float thetap = theta * t;
+        Quaternion qPerp = normalize(q1 - q0 * cosTheta);
+        float sinThetaP, cosThetaP;
+        sinThetaP = std::sin(thetap);
+        cosThetaP = std::cos(thetap);
+        //sincos(thetap, &sinThetaP, &cosThetaP);
+        return q0 * cosThetaP + qPerp * sinThetaP;
+    }
 }
 
 

@@ -421,7 +421,7 @@ CUDA_DEVICE_FUNCTION float3 sampleLight(float ul, float u0, float u1,
     lightProb *= primProb;
     lightSample->primIndex = primIndex;
 
-    //printf("%u-%u-%u\n", instIndex, geomInstIndex, primIndex);
+    //printf("%u-%u-%u: %g\n", instIndex, geomInstIndex, primIndex, lightProb);
 
     const MaterialData &mat = plp.s->materialDataBuffer[geomInst.materialSlot];
 
@@ -455,11 +455,21 @@ CUDA_DEVICE_FUNCTION float3 sampleLight(float ul, float u0, float u1,
     area *= 0.5f;
     *areaPDensity = lightProb / area;
 
+    //printf("%u-%u-%u: (%g, %g, %g), PDF: %g\n", instIndex, geomInstIndex, primIndex,
+    //       mat.emittance.x, mat.emittance.y, mat.emittance.z, *areaPDensity);
+
     //printf("%u-%u-%u: (%g, %g, %g), (%g, %g, %g)\n", instIndex, geomInstIndex, primIndex,
     //       lightPosition->x, lightPosition->y, lightPosition->z,
     //       lightNormal->x, lightNormal->y, lightNormal->z);
 
-    return mat.emittance;
+    float3 emittance = mat.emittanceScale;
+    if (mat.emittance) {
+        float2 texCoord = t0 * v[0].texCoord + t1 * v[1].texCoord + t2 * v[2].texCoord;
+        float4 texValue = tex2DLod<float4>(mat.emittance, texCoord.x, texCoord.y, 0.0f);
+        emittance *= make_float3(texValue);
+    }
+
+    return emittance;
 }
 
 CUDA_DEVICE_FUNCTION float3 evaluateLight(const LightSample &lightSample, float3* lightPosition, float3* lightNormal) {
@@ -486,7 +496,14 @@ CUDA_DEVICE_FUNCTION float3 evaluateLight(const LightSample &lightSample, float3
     float area = length(*lightNormal);
     *lightNormal = (inst.normalMatrix * *lightNormal) / area;
 
-    return mat.emittance;
+    float3 emittance = mat.emittanceScale;
+    if (mat.emittance) {
+        float2 texCoord = t0 * v[0].texCoord + t1 * v[1].texCoord + t2 * v[2].texCoord;
+        float4 texValue = tex2DLod<float4>(mat.emittance, texCoord.x, texCoord.y, 0.0f);
+        emittance *= make_float3(texValue);
+    }
+
+    return emittance;
 }
 
 CUDA_DEVICE_FUNCTION float3 sampleUnshadowedContribution(
@@ -596,6 +613,8 @@ CUDA_DEVICE_KERNEL void RT_CH_NAME(primary)() {
         float b0 = 1 - (b1 + b2);
         float3 localP = b0 * v0.position + b1 * v1.position + b2 * v2.position;
         sn = b0 * v0.normal + b1 * v1.normal + b2 * v2.normal;
+        //sn = cross(v1.position - v0.position,
+        //           v2.position - v0.position);
         texCoord = b0 * v0.texCoord + b1 * v1.texCoord + b2 * v2.texCoord;
 
         p = optixTransformPointFromObjectToWorldSpace(localP);
@@ -626,7 +645,12 @@ CUDA_DEVICE_KERNEL void RT_CH_NAME(primary)() {
         pickInfo->primIndex = hp.primIndex;
         pickInfo->positionInWorld = p;
         pickInfo->albedo = bsdf.getBaseColor(vOutLocal);
-        pickInfo->emittance = mat.emittance;
+        float3 emittance = mat.emittanceScale;
+        //if (mat.emittance) {
+        //    float4 texValue = tex2DLod<float4>(mat.emittance, texCoord.x, texCoord.y, 0.0f);
+        //    emittance *= make_float3(texValue);
+        //}
+        pickInfo->emittance = emittance;
         pickInfo->normalInWorld = sn;
     }
 
@@ -888,8 +912,14 @@ CUDA_DEVICE_KERNEL void RT_RG_NAME(shading)() {
         const Reservoir<LightSample> &reservoir = plp.s->reservoirBuffer[curResIndex][launchIndex];
 
         contribution = make_float3(0.0f);
-        if (vOutLocal.z > 0)
-            contribution += mat.emittance / Pi;
+        if (vOutLocal.z > 0) {
+            float3 emittance = mat.emittanceScale;
+            if (mat.emittance) {
+                float4 texValue = tex2DLod<float4>(mat.emittance, texCoord.x, texCoord.y, 0.0f);
+                emittance *= make_float3(texValue);
+            }
+            contribution += emittance / Pi;
+        }
 
         uint32_t numCandidateSamples = 1 << plp.f->log2NumCandidateSamples;
         const LightSample &lightSample = reservoir.getSample();
