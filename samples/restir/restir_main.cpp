@@ -1151,85 +1151,13 @@ int32_t main(int32_t argc, const char* argv[]) try {
 
     std::vector<InstanceController*> instControllers;
 
-    {
-        std::vector<Material*> tempMaterials;
-        std::vector<GeometryInstance*> tempGeomInsts;
-        std::vector<GeometryGroup*> tempGeomGroups;
-        std::vector<Instance*> tempInsts;
-        createTriangleMeshes("../../../assets/crytek_sponza/sponza.obj",
-                             translate4x4(0, 0, 0.36125f) * scale4x4(0.01f),
-                             gpuEnv,
-                             tempMaterials,
-                             tempGeomInsts,
-                             tempGeomGroups,
-                             tempInsts);
-
-        materials.insert(materials.end(), tempMaterials.begin(), tempMaterials.end());
-        geomInsts.insert(geomInsts.end(), tempGeomInsts.begin(), tempGeomInsts.end());
-        geomGroups.insert(geomGroups.end(), tempGeomGroups.begin(), tempGeomGroups.end());
-        insts.insert(insts.end(), tempInsts.begin(), tempInsts.end());
-    }
-
-    {
-        std::mt19937 rng(401850421);
-        std::uniform_real_distribution<float> u01;
-        constexpr uint32_t numLights = 100;
-        for (int lightIdx = 0; lightIdx < numLights; ++lightIdx) {
-            Material* tempMaterial;
-            GeometryInstance* tempGeomInst;
-            GeometryGroup* tempGeomGroup;
-            Instance* tempInst;
-            createSphereLight(0.05f + 0.5f * std::pow(u01(rng), 2.0f),
-                              "",
-                              HSVtoRGB(u01(rng), 0.5f + 0.5f * u01(rng), 1) * (20 + 40 * u01(rng)),
-                              float3(12 * 2 * (u01(rng) - 0.5f),
-                                     3.5f + 3 * 2 * (u01(rng) - 0.5f),
-                                     5 * 2 * (u01(rng) - 0.5f)),
-                              gpuEnv,
-                              &tempMaterial,
-                              &tempGeomInst,
-                              &tempGeomGroup,
-                              &tempInst);
-
-            materials.push_back(tempMaterial);
-            geomInsts.push_back(tempGeomInst);
-            geomGroups.push_back(tempGeomGroup);
-            insts.push_back(tempInst);
-        }
-    }
-
-    {
-        Material* tempMat;
-        GeometryInstance* tempGeomInst;
-        GeometryGroup* tempGeomGroup;
-        Instance* tempInst;
-        createRectangleLight(1.0f, 1.0f,
-                             float3(0.01f),
-                             "../../data/xy_color_diagram.png", float3(500.0f), Matrix4x4(),
-                             gpuEnv, &tempMat, &tempGeomInst, &tempGeomGroup, &tempInst);
-        materials.push_back(tempMat);
-        geomInsts.push_back(tempGeomInst);
-        geomGroups.push_back(tempGeomGroup);
-        insts.push_back(tempInst);
-
-        auto controller = new InstanceController(
-            tempInst,
-            1.0f, qRotateY(-M_PI * 0.5f) * qRotateX(-M_PI / 2), float3(3.0f, 2, 0),
-            1.0f, qRotateY(-M_PI * 0.5f) * qRotateX(-M_PI / 2), float3(-3.0f, 2, 0),
-            5.0f);
-        instControllers.push_back(controller);
-    }
-
-    g_cameraPosition = float3(-6.4f, 3, 0);
-    g_cameraOrientation = qRotateY(M_PI / 2);
-
     //{
     //    std::vector<Material*> tempMaterials;
     //    std::vector<GeometryInstance*> tempGeomInsts;
     //    std::vector<GeometryGroup*> tempGeomGroups;
     //    std::vector<Instance*> tempInsts;
-    //    createTriangleMeshes("../../../assets/Amazon_Bistro/Exterior/exterior.obj",
-    //                         scale4x4(0.001f),
+    //    createTriangleMeshes("../../../assets/crytek_sponza/sponza.obj",
+    //                         translate4x4(0, 0, 0.36125f) * scale4x4(0.01f),
     //                         gpuEnv,
     //                         tempMaterials,
     //                         tempGeomInsts,
@@ -1243,11 +1171,41 @@ int32_t main(int32_t argc, const char* argv[]) try {
     //}
 
     //{
+    //    std::mt19937 rng(401850421);
+    //    std::uniform_real_distribution<float> u01;
+    //    constexpr uint32_t numLights = 100;
+    //    for (int lightIdx = 0; lightIdx < numLights; ++lightIdx) {
+    //        Material* tempMaterial;
+    //        GeometryInstance* tempGeomInst;
+    //        GeometryGroup* tempGeomGroup;
+    //        Instance* tempInst;
+    //        createSphereLight(0.05f + 0.5f * std::pow(u01(rng), 2.0f),
+    //                          "",
+    //                          HSVtoRGB(u01(rng), 0.5f + 0.5f * u01(rng), 1) * (20 + 40 * u01(rng)),
+    //                          float3(12 * 2 * (u01(rng) - 0.5f),
+    //                                 3.5f + 3 * 2 * (u01(rng) - 0.5f),
+    //                                 5 * 2 * (u01(rng) - 0.5f)),
+    //                          gpuEnv,
+    //                          &tempMaterial,
+    //                          &tempGeomInst,
+    //                          &tempGeomGroup,
+    //                          &tempInst);
+
+    //        materials.push_back(tempMaterial);
+    //        geomInsts.push_back(tempGeomInst);
+    //        geomGroups.push_back(tempGeomGroup);
+    //        insts.push_back(tempInst);
+    //    }
+    //}
+
+    //{
     //    Material* tempMat;
     //    GeometryInstance* tempGeomInst;
     //    GeometryGroup* tempGeomGroup;
     //    Instance* tempInst;
-    //    createRectangleLight(0.1f, 0.1f, "../../data/xy_color_diagram.png", float3(500.0f), Matrix4x4(),
+    //    createRectangleLight(1.0f, 1.0f,
+    //                         float3(0.01f),
+    //                         "../../data/xy_color_diagram.png", float3(500.0f), Matrix4x4(),
     //                         gpuEnv, &tempMat, &tempGeomInst, &tempGeomGroup, &tempInst);
     //    materials.push_back(tempMat);
     //    geomInsts.push_back(tempGeomInst);
@@ -1256,14 +1214,58 @@ int32_t main(int32_t argc, const char* argv[]) try {
 
     //    auto controller = new InstanceController(
     //        tempInst,
-    //        1.0f, qRotateX(M_PI * 0.2f) * qRotateY(-M_PI * 0.3f) * qRotateX(-M_PI / 2), float3(0.362f, 0.329f, -2.0f),
-    //        1.0f, qRotateX(-M_PI * 0.2f) * qRotateY(M_PI * 0.3f) * qRotateX(-M_PI / 2), float3(-0.719f, 0.329f, -0.442f),
+    //        1.0f, qRotateY(-M_PI * 0.5f) * qRotateX(-M_PI / 2), float3(3.0f, 2, 0),
+    //        1.0f, qRotateY(-M_PI * 0.5f) * qRotateX(-M_PI / 2), float3(-3.0f, 2, 0),
     //        5.0f);
     //    instControllers.push_back(controller);
     //}
 
-    //g_cameraPosition = float3(-0.753442f, 0.140257f, -0.056083f);
-    //g_cameraOrientation = Quaternion(-0.009145f, 0.531434f, -0.005825f, 0.847030f);
+    //g_cameraPosition = float3(-6.4f, 3, 0);
+    //g_cameraOrientation = qRotateY(M_PI / 2);
+
+    {
+        std::vector<Material*> tempMaterials;
+        std::vector<GeometryInstance*> tempGeomInsts;
+        std::vector<GeometryGroup*> tempGeomGroups;
+        std::vector<Instance*> tempInsts;
+        createTriangleMeshes("../../../assets/Amazon_Bistro/Exterior/exterior.obj",
+                             scale4x4(0.001f),
+                             gpuEnv,
+                             tempMaterials,
+                             tempGeomInsts,
+                             tempGeomGroups,
+                             tempInsts);
+
+        materials.insert(materials.end(), tempMaterials.begin(), tempMaterials.end());
+        geomInsts.insert(geomInsts.end(), tempGeomInsts.begin(), tempGeomInsts.end());
+        geomGroups.insert(geomGroups.end(), tempGeomGroups.begin(), tempGeomGroups.end());
+        insts.insert(insts.end(), tempInsts.begin(), tempInsts.end());
+    }
+
+    {
+        Material* tempMat;
+        GeometryInstance* tempGeomInst;
+        GeometryGroup* tempGeomGroup;
+        Instance* tempInst;
+        createRectangleLight(0.1f, 0.1f,
+                             float3(0.01f),
+                             "../../data/xy_color_diagram.png", float3(500.0f), Matrix4x4(),
+                             gpuEnv, &tempMat, &tempGeomInst, &tempGeomGroup, &tempInst);
+        materials.push_back(tempMat);
+        geomInsts.push_back(tempGeomInst);
+        geomGroups.push_back(tempGeomGroup);
+        insts.push_back(tempInst);
+
+        auto controller = new InstanceController(
+            tempInst,
+            1.0f, qRotateX(M_PI * 0.2f) * qRotateY(-M_PI * 0.3f) * qRotateX(-M_PI / 2), float3(0.362f, 0.329f, -2.0f),
+            1.0f, qRotateX(-M_PI * 0.2f) * qRotateY(M_PI * 0.3f) * qRotateX(-M_PI / 2), float3(-0.719f, 0.329f, -0.442f),
+            5.0f);
+        instControllers.push_back(controller);
+    }
+
+    g_cameraPosition = float3(-0.753442f, 0.140257f, -0.056083f);
+    g_cameraOrientation = Quaternion(-0.009145f, 0.531434f, -0.005825f, 0.847030f);
 
     gpuEnv.instDataBuffer[0].unmap();
     gpuEnv.geomInstDataBuffer.unmap();
@@ -1853,6 +1855,7 @@ int32_t main(int32_t argc, const char* argv[]) try {
 
 
         // Camera Window
+        static float brightness = 0.0f;
         {
             ImGui::Begin("Camera", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
 
@@ -1870,6 +1873,7 @@ int32_t main(int32_t argc, const char* argv[]) try {
                                                        rollPitchYaw[1] * M_PI / 180,
                                                        rollPitchYaw[2] * M_PI / 180);
             ImGui::Text("Pos. Speed (T/G): %g", g_cameraPositionalMovingSpeed);
+            ImGui::SliderFloat("Brightness", &brightness, -2.0f, 2.0f);
 
             ImGui::End();
         }
@@ -2166,12 +2170,14 @@ int32_t main(int32_t argc, const char* argv[]) try {
             Assert_ShouldNotBeCalled();
             break;
         }
-        kernelVisualizeToOutputBuffer(cuStream, kernelVisualizeToOutputBuffer.calcGridDim(renderTargetSizeX, renderTargetSizeY),
-                                 bufferToDisplay,
-                                 bufferTypeToDisplay,
-                                 0.5f, std::pow(10.0f, motionVectorScale),
-                                 outputBufferSurfaceHolder.getNext(),
-                                 uint2(renderTargetSizeX, renderTargetSizeY));
+        kernelVisualizeToOutputBuffer(
+            cuStream, kernelVisualizeToOutputBuffer.calcGridDim(renderTargetSizeX, renderTargetSizeY),
+            bufferToDisplay,
+            bufferTypeToDisplay,
+            std::pow(10.0f, brightness),
+            0.5f, std::pow(10.0f, motionVectorScale),
+            outputBufferSurfaceHolder.getNext(),
+            uint2(renderTargetSizeX, renderTargetSizeY));
 
         outputBufferSurfaceHolder.endCUDAAccess(cuStream);
 

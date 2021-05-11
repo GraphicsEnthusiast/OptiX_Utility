@@ -30,6 +30,7 @@ CUDA_DEVICE_KERNEL void copyToLinearBuffers(
 CUDA_DEVICE_KERNEL void visualizeToOutputBuffer(
     void* linearBuffer,
     Shared::BufferToDisplay bufferTypeToDisplay,
+    float brightness,
     float motionVectorOffset, float motionVectorScale,
     optixu::NativeBlockBuffer2D<float4> outputBuffer,
     uint2 imageSize) {
@@ -45,7 +46,7 @@ CUDA_DEVICE_KERNEL void visualizeToOutputBuffer(
     case Shared::BufferToDisplay::NoisyBeauty:
     case Shared::BufferToDisplay::DenoisedBeauty: {
         auto typedLinearBuffer = reinterpret_cast<float4*>(linearBuffer);
-        value = typedLinearBuffer[linearIndex];
+        value = brightness * typedLinearBuffer[linearIndex];
         // simple tone-map
         value.x = 1 - std::exp(-value.x);
         value.y = 1 - std::exp(-value.y);
