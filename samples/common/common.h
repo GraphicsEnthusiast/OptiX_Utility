@@ -303,6 +303,12 @@ CUDA_DEVICE_FUNCTION float3 getXYZ(const float4 &v) {
 CUDA_DEVICE_FUNCTION float2 make_float2(float v) {
     return make_float2(v, v);
 }
+CUDA_DEVICE_FUNCTION bool operator==(const float2 &v0, const float2 &v1) {
+    return v0.x == v1.x && v0.y == v1.y;
+}
+CUDA_DEVICE_FUNCTION bool operator!=(const float2 &v0, const float2 &v1) {
+    return v0.x != v1.x || v0.y != v1.y;
+}
 CUDA_DEVICE_FUNCTION float2 operator-(const float2 &v) {
     return make_float2(-v.x, -v.y);
 }
@@ -331,6 +337,12 @@ CUDA_DEVICE_FUNCTION float3 make_float3(float v) {
 }
 CUDA_DEVICE_FUNCTION float3 make_float3(const float4 &v) {
     return make_float3(v.x, v.y, v.z);
+}
+CUDA_DEVICE_FUNCTION bool operator==(const float3 &v0, const float3 &v1) {
+    return v0.x == v1.x && v0.y == v1.y && v0.z == v1.z;
+}
+CUDA_DEVICE_FUNCTION bool operator!=(const float3 &v0, const float3 &v1) {
+    return v0.x != v1.x || v0.y != v1.y || v0.z != v1.z;
 }
 CUDA_DEVICE_FUNCTION float3 operator-(const float3 &v) {
     return make_float3(-v.x, -v.y, -v.z);
@@ -400,6 +412,12 @@ CUDA_DEVICE_FUNCTION float4 make_float4(const float3 &v) {
 }
 CUDA_DEVICE_FUNCTION float4 make_float4(const float3 &v, float w) {
     return make_float4(v.x, v.y, v.z, w);
+}
+CUDA_DEVICE_FUNCTION bool operator==(const float4 &v0, const float4 &v1) {
+    return v0.x == v1.x && v0.y == v1.y && v0.z == v1.z && v0.w == v1.w;
+}
+CUDA_DEVICE_FUNCTION bool operator!=(const float4 &v0, const float4 &v1) {
+    return v0.x != v1.x || v0.y != v1.y || v0.z != v1.z || v0.w != v1.w;
 }
 CUDA_DEVICE_FUNCTION float4 operator-(const float4 &v) {
     return make_float4(-v.x, -v.y, -v.z, -v.w);
@@ -618,6 +636,9 @@ struct Matrix3x3 {
         return Matrix3x3(make_float3(dot(r[0], mat.c0), dot(r[1], mat.c0), dot(r[2], mat.c0)),
                          make_float3(dot(r[0], mat.c1), dot(r[1], mat.c1), dot(r[2], mat.c1)),
                          make_float3(dot(r[0], mat.c2), dot(r[1], mat.c2), dot(r[2], mat.c2)));
+    }
+    CUDA_DEVICE_FUNCTION friend Matrix3x3 operator*(float s, const Matrix3x3 &mat) {
+        return Matrix3x3(s * mat.c0, s * mat.c1, s * mat.c2);
     }
     CUDA_DEVICE_FUNCTION float3 operator*(const float3 &v) const {
         const float3 r[] = { row(0), row(1), row(2) };
@@ -942,6 +963,13 @@ struct Quaternion {
     CUDA_DEVICE_FUNCTION constexpr Quaternion(float xx, float yy, float zz, float ww) : v(make_float3(xx, yy, zz)), w(ww) {}
     CUDA_DEVICE_FUNCTION constexpr Quaternion(const float3 &vv, float ww) : v(vv), w(ww) {}
 
+    CUDA_DEVICE_FUNCTION bool operator==(const Quaternion &q) const {
+        return v == q.v && w == q.w;
+    }
+    CUDA_DEVICE_FUNCTION bool operator!=(const Quaternion &q) const {
+        return v != q.v || w != q.w;
+    }
+
     CUDA_DEVICE_FUNCTION Quaternion operator+() const { return *this; }
     CUDA_DEVICE_FUNCTION Quaternion operator-() const { return Quaternion(-v, -w); }
 
@@ -981,7 +1009,15 @@ struct Quaternion {
                          make_float3(2 * (xy - zw), 1 - 2 * (xx + zz), 2 * (yz + xw)),
                          make_float3(2 * (zx + yw), 2 * (yz - xw), 1 - 2 * (xx + yy)));
     }
+
+    CUDA_DEVICE_FUNCTION bool allFinite() const {
+        return ::allFinite(v) && std::isfinite(w);
+    }
 };
+
+CUDA_DEVICE_FUNCTION bool allFinite(const Quaternion &q) {
+    return q.allFinite();
+}
 
 CUDA_DEVICE_FUNCTION float dot(const Quaternion &q0, const Quaternion &q1) {
     return dot(q0.v, q1.v) + q0.w * q1.w;

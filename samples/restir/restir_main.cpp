@@ -79,6 +79,269 @@ Quaternion g_cameraOrientation;
 Quaternion g_tempCameraOrientation;
 float3 g_cameraPosition;
 
+struct MeshGeometryInfo {
+    std::filesystem::path path;
+    float preScale;
+};
+
+struct RectangleGeometryInfo {
+    float dimX;
+    float dimZ;
+    float3 emittance;
+    std::filesystem::path emitterTexPath;
+};
+
+struct MeshInstanceInfo {
+    std::string name;
+    float3 beginPosition;
+    float3 endPosition;
+    float beginScale;
+    float endScale;
+    Quaternion beginOrientation;
+    Quaternion endOrientation;
+    float frequency;
+};
+
+static bool g_takeScreenShot = false;
+
+using MeshInfo = std::variant<MeshGeometryInfo, RectangleGeometryInfo>;
+std::map<std::string, MeshInfo> g_meshInfos;
+static std::vector<MeshInstanceInfo> g_meshInstInfos;
+
+static void parseCommandline(int32_t argc, const char* argv[]) {
+    std::string name;
+
+    Quaternion camOrientation = Quaternion();
+
+    float3 beginPosition = float3(0.0f, 0.0f, 0.0f);
+    float3 endPosition = float3(NAN, NAN, NAN);
+    Quaternion beginOrientation = Quaternion();
+    Quaternion endOrientation = Quaternion(NAN, NAN, NAN, NAN);
+    float beginScale = 1.0f;
+    float endScale = NAN;
+    float frequency = 5.0f;
+    float3 emittance = float3(0.0f, 0.0f, 0.0f);
+    std::filesystem::path rectEmitterTexPath;
+
+    for (int i = 0; i < argc; ++i) {
+        const char* arg = argv[i];
+
+        const auto computeOrientation = [&argc, &argv, &i](const char* arg, Quaternion* ori) {
+            if (!allFinite(*ori))
+                *ori = Quaternion();
+            if (strncmp(arg, "-roll", 6) == 0) {
+                if (i + 1 >= argc) {
+                    hpprintf("Invalid option.\n");
+                    exit(EXIT_FAILURE);
+                }
+                *ori = qRotateZ(atof(argv[i + 1]) * M_PI / 180) * *ori;
+                i += 1;
+            }
+            else if (strncmp(arg, "-pitch", 7) == 0) {
+                if (i + 1 >= argc) {
+                    hpprintf("Invalid option.\n");
+                    exit(EXIT_FAILURE);
+                }
+                *ori = qRotateX(atof(argv[i + 1]) * M_PI / 180) * *ori;
+                i += 1;
+            }
+            else if (strncmp(arg, "-yaw", 5) == 0) {
+                if (i + 1 >= argc) {
+                    hpprintf("Invalid option.\n");
+                    exit(EXIT_FAILURE);
+                }
+                *ori = qRotateY(atof(argv[i + 1]) * M_PI / 180) * *ori;
+                i += 1;
+            }
+        };
+
+        if (strncmp(arg, "-", 1) != 0)
+            continue;
+
+        if (strncmp(arg, "-screenshot", 12) == 0) {
+            g_takeScreenShot = true;
+            i += 1;
+        }
+        else if (strncmp(arg, "-cam-pos", 9) == 0) {
+            if (i + 3 >= argc) {
+                hpprintf("Invalid option.\n");
+                exit(EXIT_FAILURE);
+            }
+            g_cameraPosition = float3(atof(argv[i + 1]), atof(argv[i + 2]), atof(argv[i + 3]));
+            i += 3;
+        }
+        else if (strncmp(arg, "-cam-roll", 10) == 0 ||
+                 strncmp(arg, "-cam-pitch", 11) == 0 ||
+                 strncmp(arg, "-cam-yaw", 9) == 0) {
+            computeOrientation(arg + 4, &camOrientation);
+        }
+        else if (strncmp(arg, "-name", 6) == 0) {
+            if (i + 1 >= argc) {
+                hpprintf("Invalid option.\n");
+                exit(EXIT_FAILURE);
+            }
+            name = argv[i + 1];
+            i += 1;
+        }
+        else if (0 == strncmp(arg, "-emittance", 11)) {
+            if (i + 3 >= argc) {
+                printf("Invalid option.\n");
+                exit(EXIT_FAILURE);
+            }
+            emittance = float3(atof(argv[i + 1]), atof(argv[i + 2]), atof(argv[i + 3]));
+            if (!allFinite(emittance)) {
+                printf("Invalid value.\n");
+                exit(EXIT_FAILURE);
+            }
+            i += 3;
+        }
+        else if (0 == strncmp(arg, "-rect-emitter-tex", 18)) {
+            if (i + 1 >= argc) {
+                printf("Invalid option.\n");
+                exit(EXIT_FAILURE);
+            }
+            rectEmitterTexPath = argv[i + 1];
+            i += 1;
+        }
+        else if (0 == strncmp(arg, "-obj", 5)) {
+            if (i + 2 >= argc) {
+                printf("Invalid option.\n");
+                exit(EXIT_FAILURE);
+            }
+
+            MeshInfo info = MeshGeometryInfo();
+            auto &mesh = std::get<MeshGeometryInfo>(info);
+            mesh.path = std::filesystem::path(argv[i + 1]);
+            mesh.preScale = atof(argv[i + 2]);
+            g_meshInfos[name] = info;
+
+            i += 2;
+        }
+        else if (0 == strncmp(arg, "-rectangle", 11)) {
+            if (i + 2 >= argc) {
+                printf("Invalid option.\n");
+                exit(EXIT_FAILURE);
+            }
+
+            MeshInfo info = RectangleGeometryInfo();
+            auto &rect = std::get<RectangleGeometryInfo>(info);
+            rect.dimX = atof(argv[i + 1]);
+            rect.dimZ = atof(argv[i + 2]);
+            rect.emittance = emittance;
+            rect.emitterTexPath = rectEmitterTexPath;
+            g_meshInfos[name] = info;
+
+            emittance = float3(0.0f, 0.0f, 0.0f);
+            rectEmitterTexPath = "";
+
+            i += 2;
+        }
+        else if (0 == strncmp(arg, "-begin-pos", 11)) {
+            if (i + 3 >= argc) {
+                printf("Invalid option.\n");
+                exit(EXIT_FAILURE);
+            }
+            beginPosition = float3(atof(argv[i + 1]), atof(argv[i + 2]), atof(argv[i + 3]));
+            if (!allFinite(beginPosition)) {
+                printf("Invalid value.\n");
+                exit(EXIT_FAILURE);
+            }
+            i += 3;
+        }
+        else if (strncmp(arg, "-begin-roll", 10) == 0 ||
+                 strncmp(arg, "-begin-pitch", 11) == 0 ||
+                 strncmp(arg, "-begin-yaw", 9) == 0) {
+            computeOrientation(arg + 6, &beginOrientation);
+        }
+        else if (0 == strncmp(arg, "-begin-scale", 13)) {
+            if (i + 1 >= argc) {
+                printf("Invalid option.\n");
+                exit(EXIT_FAILURE);
+            }
+            beginScale = atof(argv[i + 1]);
+            if (!isfinite(beginScale)) {
+                printf("Invalid value.\n");
+                exit(EXIT_FAILURE);
+            }
+            i += 1;
+        }
+        else if (0 == strncmp(arg, "-end-pos", 9)) {
+            if (i + 3 >= argc) {
+                printf("Invalid option.\n");
+                exit(EXIT_FAILURE);
+            }
+            endPosition = float3(atof(argv[i + 1]), atof(argv[i + 2]), atof(argv[i + 3]));
+            if (!allFinite(endPosition)) {
+                printf("Invalid value.\n");
+                exit(EXIT_FAILURE);
+            }
+            i += 3;
+        }
+        else if (strncmp(arg, "-end-roll", 10) == 0 ||
+                 strncmp(arg, "-end-pitch", 11) == 0 ||
+                 strncmp(arg, "-end-yaw", 9) == 0) {
+            computeOrientation(arg + 4, &endOrientation);
+        }
+        else if (0 == strncmp(arg, "-end-scale", 11)) {
+            if (i + 1 >= argc) {
+                printf("Invalid option.\n");
+                exit(EXIT_FAILURE);
+            }
+            endScale = atof(argv[i + 1]);
+            if (!isfinite(endScale)) {
+                printf("Invalid value.\n");
+                exit(EXIT_FAILURE);
+            }
+            i += 1;
+        }
+        else if (0 == strncmp(arg, "-freq", 6)) {
+            if (i + 1 >= argc) {
+                printf("Invalid option.\n");
+                exit(EXIT_FAILURE);
+            }
+            frequency = atof(argv[i + 1]);
+            if (!isfinite(frequency)) {
+                printf("Invalid value.\n");
+                exit(EXIT_FAILURE);
+            }
+            i += 1;
+        }
+        else if (0 == strncmp(arg, "-inst", 6)) {
+            if (i + 1 >= argc) {
+                printf("Invalid option.\n");
+                exit(EXIT_FAILURE);
+            }
+
+            MeshInstanceInfo info;
+            info.name = argv[i + 1];
+            info.beginPosition = beginPosition;
+            info.beginOrientation = beginOrientation;
+            info.beginScale = beginScale;
+            info.endPosition = allFinite(endPosition) ? endPosition : beginPosition;
+            info.endOrientation = endOrientation.allFinite() ? endOrientation : beginOrientation;
+            info.endScale = std::isfinite(endScale) ? endScale : beginScale;
+            info.frequency = frequency;
+            g_meshInstInfos.push_back(info);
+
+            beginPosition = float3(0.0f, 0.0f, 0.0f);
+            endPosition = float3(NAN, NAN, NAN);
+            beginOrientation = Quaternion();
+            endOrientation = Quaternion(NAN, NAN, NAN, NAN);
+            beginScale = 1.0f;
+            endScale = NAN;
+            frequency = 5.0f;
+
+            i += 1;
+        }
+        else {
+            printf("Unknown option.\n");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    g_cameraOrientation = camOrientation;
+}
+
 
 
 enum CallableProgram {
@@ -382,6 +645,14 @@ struct Instance {
     optixu::Instance optixInst;
 };
 
+struct Mesh {
+    struct Group {
+        const GeometryGroup* geomGroup;
+        Matrix4x4 transform;
+    };
+    std::vector<Group> groups;
+};
+
 
 
 struct FlattenedNode {
@@ -604,7 +875,7 @@ void createTriangleMeshes(const std::filesystem::path &filePath,
                           std::vector<Material*> &materials,
                           std::vector<GeometryInstance*> &geomInsts,
                           std::vector<GeometryGroup*> &geomGroups,
-                          std::vector<Instance*> &insts) {
+                          Mesh* mesh) {
     hpprintf("Reading: %s ... ", filePath.string().c_str());
     fflush(stdout);
     Assimp::Importer importer;
@@ -726,7 +997,7 @@ void createTriangleMeshes(const std::filesystem::path &filePath,
     computeFlattenedNodes(scene, Matrix4x4(), scene->mRootNode, flattenedNodes);
 
     geomGroups.clear();
-    insts.clear();
+    mesh->groups.clear();
     Shared::InstanceData* instDataOnHost = gpuEnv.instDataBuffer[0].getMappedPointer();
     std::map<std::set<const GeometryInstance*>, GeometryGroup*> geomGroupMap;
     for (int nodeIdx = 0; nodeIdx < flattenedNodes.size(); ++nodeIdx) {
@@ -746,7 +1017,10 @@ void createTriangleMeshes(const std::filesystem::path &filePath,
             geomGroups.push_back(geomGroup);
         }
 
-        insts.push_back(createInstance(gpuEnv, geomGroup, node.transform));
+        Mesh::Group g = {};
+        g.geomGroup = geomGroup;
+        g.transform = node.transform;
+        mesh->groups.push_back(g);
     }
 }
 
@@ -759,7 +1033,7 @@ void createRectangleLight(float width, float depth,
                           Material** material,
                           GeometryInstance** geomInst,
                           GeometryGroup** geomGroup,
-                          Instance** inst) {
+                          Mesh* mesh) {
     *material = createLambertMaterial(gpuEnv, "", reflectance, emittancePath, emittanceScale);
 
     std::vector<Shared::Vertex> vertices = {
@@ -777,7 +1051,11 @@ void createRectangleLight(float width, float depth,
     std::set<const GeometryInstance*> srcGeomInsts = { *geomInst };
     *geomGroup = createGeometryGroup(gpuEnv, srcGeomInsts);
 
-    *inst = createInstance(gpuEnv, *geomGroup, transform);
+    Mesh::Group g = {};
+    g.geomGroup = *geomGroup;
+    g.transform = transform;
+    mesh->groups.clear();
+    mesh->groups.push_back(g);
 }
 
 void createSphereLight(float radius,
@@ -788,7 +1066,7 @@ void createSphereLight(float radius,
                        Material** material,
                        GeometryInstance** geomInst,
                        GeometryGroup** geomGroup,
-                       Instance** inst) {
+                       Mesh* mesh) {
     *material = createLambertMaterial(gpuEnv, "", float3(0.8f), emittancePath, emittanceScale);
 
     constexpr uint32_t numZenithSegments = 8;
@@ -851,7 +1129,11 @@ void createSphereLight(float radius,
     std::set<const GeometryInstance*> srcGeomInsts = { *geomInst };
     *geomGroup = createGeometryGroup(gpuEnv, srcGeomInsts);
 
-    *inst = createInstance(gpuEnv, *geomGroup, translate4x4(position));
+    Mesh::Group g = {};
+    g.geomGroup = *geomGroup;
+    g.transform = Matrix4x4();
+    mesh->groups.clear();
+    mesh->groups.push_back(g);
 }
 
 
@@ -872,17 +1154,7 @@ namespace ImGui {
 int32_t main(int32_t argc, const char* argv[]) try {
     const std::filesystem::path exeDir = getExecutableDirectory();
 
-    bool takeScreenShot = false;
-
-    uint32_t argIdx = 1;
-    while (argIdx < argc) {
-        std::string_view arg = argv[argIdx];
-        if (arg == "--screen-shot")
-            takeScreenShot = true;
-        else
-            throw std::runtime_error("Unknown command line argument.");
-        ++argIdx;
-    }
+    parseCommandline(argc, argv);
 
     // ----------------------------------------------------------------
     // JP: OpenGL, GLFWの初期化。
@@ -1070,62 +1342,6 @@ int32_t main(int32_t argc, const char* argv[]) try {
 
 
 
-    struct InstanceController {
-        Instance* inst;
-
-        float curScale;
-        Quaternion curOrientation;
-        float3 curPosition;
-        Matrix4x4 prevMatM2W;
-        Matrix4x4 matM2W;
-        Matrix3x3 nMatM2W;
-
-        float beginScale;
-        Quaternion beginOrientation;
-        float3 beginPosition;
-        float endScale;
-        Quaternion endOrientation;
-        float3 endPosition;
-        float time;
-        float frequency;
-
-        InstanceController(
-            Instance* _inst,
-            float _beginScale, const Quaternion &_beginOrienatation, const float3 &_beginPosition,
-            float _endScale, const Quaternion &_endOrienatation, const float3 &_endPosition,
-            float _frequency) :
-            inst(_inst),
-            beginScale(_beginScale), beginOrientation(_beginOrienatation), beginPosition(_beginPosition),
-            endScale(_endScale), endOrientation(_endOrienatation), endPosition(_endPosition),
-            time(0), frequency(_frequency) {
-        }
-
-        void updateBody(float dt) {
-            time = std::fmod(time + dt, frequency);
-            float t = 0.5f - 0.5f * std::cos(2 * M_PI * time / frequency);
-            curScale = (1 - t) * beginScale + t * endScale;
-            curOrientation = Slerp(t, beginOrientation, endOrientation);
-            curPosition = (1 - t) * beginPosition + t * endPosition;
-        }
-
-        void update(Shared::InstanceData* instDataBuffer, float dt) {
-            prevMatM2W = matM2W;
-            updateBody(dt);
-            matM2W = Matrix4x4(curOrientation.toMatrix3x3() * scale3x3(curScale), curPosition);
-            nMatM2W = transpose(inverse(matM2W.getUpperLeftMatrix()));
-
-            Matrix4x4 tMatM2W = transpose(matM2W);
-            inst->optixInst.setTransform(reinterpret_cast<const float*>(&tMatM2W));
-
-            Shared::InstanceData &instData = instDataBuffer[inst->instSlot];
-            instData.prevTransform = prevMatM2W;
-            instData.transform = matM2W;
-            instData.normalMatrix = nMatM2W;
-        }
-    };
-
-
-
     GPUEnvironment gpuEnv;
     gpuEnv.initialize();
 
@@ -1144,128 +1360,129 @@ int32_t main(int32_t argc, const char* argv[]) try {
     g_cameraDirectionalMovingSpeed = 0.0015f;
     g_cameraTiltSpeed = 0.025f;
 
+    struct InstanceController {
+        Instance* inst;
+        Matrix4x4 defaultTransform;
+
+        float curScale;
+        Quaternion curOrientation;
+        float3 curPosition;
+        Matrix4x4 prevMatM2W;
+        Matrix4x4 matM2W;
+        Matrix3x3 nMatM2W;
+
+        float beginScale;
+        Quaternion beginOrientation;
+        float3 beginPosition;
+        float endScale;
+        Quaternion endOrientation;
+        float3 endPosition;
+        float time;
+        float frequency;
+
+        InstanceController(
+            Instance* _inst, const Matrix4x4 &_defaultTranform,
+            float _beginScale, const Quaternion &_beginOrienatation, const float3 &_beginPosition,
+            float _endScale, const Quaternion &_endOrienatation, const float3 &_endPosition,
+            float _frequency) :
+            inst(_inst), defaultTransform(_defaultTranform),
+            beginScale(_beginScale), beginOrientation(_beginOrienatation), beginPosition(_beginPosition),
+            endScale(_endScale), endOrientation(_endOrienatation), endPosition(_endPosition),
+            time(0), frequency(_frequency) {
+        }
+
+        void updateBody(float dt) {
+            time = std::fmod(time + dt, frequency);
+            float t = 0.5f - 0.5f * std::cos(2 * M_PI * time / frequency);
+            curScale = (1 - t) * beginScale + t * endScale;
+            curOrientation = Slerp(t, beginOrientation, endOrientation);
+            curPosition = (1 - t) * beginPosition + t * endPosition;
+        }
+
+        void update(Shared::InstanceData* instDataBuffer, float dt) {
+            prevMatM2W = matM2W;
+            updateBody(dt);
+            matM2W = Matrix4x4(curOrientation.toMatrix3x3() * scale3x3(curScale), curPosition) * defaultTransform;
+            nMatM2W = transpose(inverse(matM2W.getUpperLeftMatrix()));
+
+            Matrix4x4 tMatM2W = transpose(matM2W);
+            inst->optixInst.setTransform(reinterpret_cast<const float*>(&tMatM2W));
+
+            Shared::InstanceData &instData = instDataBuffer[inst->instSlot];
+            instData.prevTransform = prevMatM2W;
+            instData.transform = matM2W;
+            instData.normalMatrix = nMatM2W;
+        }
+    };
+
     std::vector<Material*> materials;
     std::vector<GeometryInstance*> geomInsts;
     std::vector<GeometryGroup*> geomGroups;
-    std::vector<Instance*> insts;
 
-    std::vector<InstanceController*> instControllers;
+    std::map<std::string, Mesh*> meshes;
+    for (auto it = g_meshInfos.cbegin(); it != g_meshInfos.cend(); ++it) {
+        const MeshInfo &info = it->second;
 
-    //{
-    //    std::vector<Material*> tempMaterials;
-    //    std::vector<GeometryInstance*> tempGeomInsts;
-    //    std::vector<GeometryGroup*> tempGeomGroups;
-    //    std::vector<Instance*> tempInsts;
-    //    createTriangleMeshes("../../../assets/crytek_sponza/sponza.obj",
-    //                         translate4x4(0, 0, 0.36125f) * scale4x4(0.01f),
-    //                         gpuEnv,
-    //                         tempMaterials,
-    //                         tempGeomInsts,
-    //                         tempGeomGroups,
-    //                         tempInsts);
-
-    //    materials.insert(materials.end(), tempMaterials.begin(), tempMaterials.end());
-    //    geomInsts.insert(geomInsts.end(), tempGeomInsts.begin(), tempGeomInsts.end());
-    //    geomGroups.insert(geomGroups.end(), tempGeomGroups.begin(), tempGeomGroups.end());
-    //    insts.insert(insts.end(), tempInsts.begin(), tempInsts.end());
-    //}
-
-    //{
-    //    std::mt19937 rng(401850421);
-    //    std::uniform_real_distribution<float> u01;
-    //    constexpr uint32_t numLights = 100;
-    //    for (int lightIdx = 0; lightIdx < numLights; ++lightIdx) {
-    //        Material* tempMaterial;
-    //        GeometryInstance* tempGeomInst;
-    //        GeometryGroup* tempGeomGroup;
-    //        Instance* tempInst;
-    //        createSphereLight(0.05f + 0.5f * std::pow(u01(rng), 2.0f),
-    //                          "",
-    //                          HSVtoRGB(u01(rng), 0.5f + 0.5f * u01(rng), 1) * (20 + 40 * u01(rng)),
-    //                          float3(12 * 2 * (u01(rng) - 0.5f),
-    //                                 3.5f + 3 * 2 * (u01(rng) - 0.5f),
-    //                                 5 * 2 * (u01(rng) - 0.5f)),
-    //                          gpuEnv,
-    //                          &tempMaterial,
-    //                          &tempGeomInst,
-    //                          &tempGeomGroup,
-    //                          &tempInst);
-
-    //        materials.push_back(tempMaterial);
-    //        geomInsts.push_back(tempGeomInst);
-    //        geomGroups.push_back(tempGeomGroup);
-    //        insts.push_back(tempInst);
-    //    }
-    //}
-
-    //{
-    //    Material* tempMat;
-    //    GeometryInstance* tempGeomInst;
-    //    GeometryGroup* tempGeomGroup;
-    //    Instance* tempInst;
-    //    createRectangleLight(1.0f, 1.0f,
-    //                         float3(0.01f),
-    //                         "../../data/xy_color_diagram.png", float3(500.0f), Matrix4x4(),
-    //                         gpuEnv, &tempMat, &tempGeomInst, &tempGeomGroup, &tempInst);
-    //    materials.push_back(tempMat);
-    //    geomInsts.push_back(tempGeomInst);
-    //    geomGroups.push_back(tempGeomGroup);
-    //    insts.push_back(tempInst);
-
-    //    auto controller = new InstanceController(
-    //        tempInst,
-    //        1.0f, qRotateY(-M_PI * 0.5f) * qRotateX(-M_PI / 2), float3(3.0f, 2, 0),
-    //        1.0f, qRotateY(-M_PI * 0.5f) * qRotateX(-M_PI / 2), float3(-3.0f, 2, 0),
-    //        5.0f);
-    //    instControllers.push_back(controller);
-    //}
-
-    //g_cameraPosition = float3(-6.4f, 3, 0);
-    //g_cameraOrientation = qRotateY(M_PI / 2);
-
-    {
         std::vector<Material*> tempMaterials;
         std::vector<GeometryInstance*> tempGeomInsts;
         std::vector<GeometryGroup*> tempGeomGroups;
-        std::vector<Instance*> tempInsts;
-        createTriangleMeshes("../../../assets/Amazon_Bistro/Exterior/exterior.obj",
-                             scale4x4(0.001f),
-                             gpuEnv,
-                             tempMaterials,
-                             tempGeomInsts,
-                             tempGeomGroups,
-                             tempInsts);
+        Mesh* mesh = new Mesh();
+
+        if (std::holds_alternative<MeshGeometryInfo>(info)) {
+            const auto &meshInfo = std::get<MeshGeometryInfo>(info);
+
+            createTriangleMeshes(meshInfo.path,
+                                 scale4x4(meshInfo.preScale),
+                                 gpuEnv,
+                                 tempMaterials,
+                                 tempGeomInsts,
+                                 tempGeomGroups,
+                                 mesh);
+        }
+        else if (std::holds_alternative<RectangleGeometryInfo>(info)) {
+            const auto &rectInfo = std::get<RectangleGeometryInfo>(info);
+
+            tempMaterials.push_back(new Material());
+            tempGeomInsts.push_back(new GeometryInstance());
+            tempGeomGroups.push_back(new GeometryGroup());
+            createRectangleLight(rectInfo.dimX, rectInfo.dimZ,
+                                 float3(0.01f),
+                                 rectInfo.emitterTexPath, rectInfo.emittance, Matrix4x4(),
+                                 gpuEnv, &tempMaterials[0], &tempGeomInsts[0], &tempGeomGroups[0],
+                                 mesh);
+        }
 
         materials.insert(materials.end(), tempMaterials.begin(), tempMaterials.end());
         geomInsts.insert(geomInsts.end(), tempGeomInsts.begin(), tempGeomInsts.end());
         geomGroups.insert(geomGroups.end(), tempGeomGroups.begin(), tempGeomGroups.end());
-        insts.insert(insts.end(), tempInsts.begin(), tempInsts.end());
+        meshes[it->first] = mesh;
     }
 
-    {
-        Material* tempMat;
-        GeometryInstance* tempGeomInst;
-        GeometryGroup* tempGeomGroup;
-        Instance* tempInst;
-        createRectangleLight(0.1f, 0.1f,
-                             float3(0.01f),
-                             "../../data/xy_color_diagram.png", float3(500.0f), Matrix4x4(),
-                             gpuEnv, &tempMat, &tempGeomInst, &tempGeomGroup, &tempInst);
-        materials.push_back(tempMat);
-        geomInsts.push_back(tempGeomInst);
-        geomGroups.push_back(tempGeomGroup);
-        insts.push_back(tempInst);
+    std::vector<Instance*> insts;
+    std::vector<InstanceController*> instControllers;
+    for (int i = 0; i < g_meshInstInfos.size(); ++i) {
+        const MeshInstanceInfo &info = g_meshInstInfos[i];
+        const Mesh* mesh = meshes.at(info.name);
+        for (int j = 0; j < mesh->groups.size(); ++j) {
+            const Mesh::Group &group = mesh->groups[j];
 
-        auto controller = new InstanceController(
-            tempInst,
-            1.0f, qRotateX(M_PI * 0.2f) * qRotateY(-M_PI * 0.3f) * qRotateX(-M_PI / 2), float3(0.362f, 0.329f, -2.0f),
-            1.0f, qRotateX(-M_PI * 0.2f) * qRotateY(M_PI * 0.3f) * qRotateX(-M_PI / 2), float3(-0.719f, 0.329f, -0.442f),
-            5.0f);
-        instControllers.push_back(controller);
+            Matrix4x4 instXfm = Matrix4x4(info.beginScale * info.beginOrientation.toMatrix3x3(), info.beginPosition);
+            Instance* inst = createInstance(gpuEnv, group.geomGroup, instXfm * group.transform);
+            insts.push_back(inst);
+
+            if (info.beginPosition != info.endPosition ||
+                info.beginOrientation != info.endOrientation ||
+                info.beginScale != info.endScale) {
+                // TODO: group.transformを追加のtransformにする？
+                auto controller = new InstanceController(
+                    inst, group.transform,
+                    info.beginScale, info.beginOrientation, info.beginPosition,
+                    info.endScale, info.endOrientation, info.endPosition,
+                    info.frequency);
+                instControllers.push_back(controller);
+            }
+        }
     }
-
-    g_cameraPosition = float3(-0.753442f, 0.140257f, -0.056083f);
-    g_cameraOrientation = Quaternion(-0.009145f, 0.531434f, -0.005825f, 0.847030f);
 
     gpuEnv.instDataBuffer[0].unmap();
     gpuEnv.geomInstDataBuffer.unmap();
@@ -2185,7 +2402,7 @@ int32_t main(int32_t argc, const char* argv[]) try {
 
         curGPUTimer.frame.stop(cuStream);
 
-        if (takeScreenShot && frameIndex + 1 == 60) {
+        if (g_takeScreenShot && frameIndex + 1 == 60) {
             CUDADRV_CHECK(cuStreamSynchronize(cuStream));
             auto rawImage = new float4[renderTargetSizeX * renderTargetSizeY];
             glGetTextureSubImage(
