@@ -331,7 +331,7 @@ CUDA_DEVICE_KERNEL void RT_AH_NAME(visibility)() {
 CUDA_DEVICE_KERNEL void RT_RG_NAME(primary)() {
     uint2 launchIndex = make_uint2(optixGetLaunchIndex().x, optixGetLaunchIndex().y);
 
-    PCG32RNG rng = plp.s->rngBuffer[launchIndex];
+    PCG32RNG rng = plp.s->rngBuffer.read(launchIndex);
 
     const PerspectiveCamera &camera = plp.f->camera;
     float x = (launchIndex.x + 0.5f) / plp.s->imageSize.x;
@@ -570,10 +570,10 @@ CUDA_DEVICE_FUNCTION bool evaluateVisibility(
     float dist2 = sqLength(shadowRayDir);
     float dist = std::sqrt(dist2);
     shadowRayDir /= dist;
-    float3 shadowRayDirLocal = shadingFrame.toLocal(shadowRayDir);
+    //float3 shadowRayDirLocal = shadingFrame.toLocal(shadowRayDir);
 
-    float lpCos = dot(-shadowRayDir, lpn);
-    float spCos = shadowRayDirLocal.z;
+    //float lpCos = dot(-shadowRayDir, lpn);
+    //float spCos = shadowRayDirLocal.z;
 
     float visibility = 1.0f;
     optixu::trace<VisibilityRayPayloadSignature>(
@@ -677,7 +677,7 @@ CUDA_DEVICE_KERNEL void RT_CH_NAME(primary)() {
         reservoir.setRecPDFValue(0.0f);
 
     //uint32_t linearIndex = launchIndex.y * plp.imageSize.x + launchIndex.x;
-    plp.s->rngBuffer[launchIndex] = rng;
+    plp.s->rngBuffer.write(launchIndex, rng);
     plp.s->reservoirBuffer[curResIndex][launchIndex] = reservoir;
 }
 
@@ -692,6 +692,8 @@ CUDA_DEVICE_FUNCTION bool testNeighbor(
     GBuffer0 nGBuffer0 = plp.s->GBuffer0[nBufIdx].read(neighborIndex);
     GBuffer1 nGBuffer1 = plp.s->GBuffer1[nBufIdx].read(neighborIndex);
     float3 nPositionInWorld = nGBuffer0.positionInWorld;
+    if (!allFinite(nPositionInWorld))
+        return false;
     float3 nNormalInWorld = nGBuffer1.normalInWorld;
     float nDist = length(plp.f->camera.position - nPositionInWorld);
     if (abs(nDist - dist) / dist > 0.1f || dot(normalInWorld, nNormalInWorld) < 0.9f)
@@ -705,7 +707,7 @@ CUDA_DEVICE_FUNCTION bool testNeighbor(
 CUDA_DEVICE_KERNEL void RT_RG_NAME(combineTemporalNeighbors)() {
     int2 launchIndex = make_int2(optixGetLaunchIndex().x, optixGetLaunchIndex().y);
 
-    PCG32RNG rng = plp.s->rngBuffer[launchIndex];
+    PCG32RNG rng = plp.s->rngBuffer.read(launchIndex);
 
     uint32_t curBufIdx = plp.f->bufferIndex;
     uint32_t prevBufIdx = (curBufIdx + 1) % 2;
@@ -761,7 +763,7 @@ CUDA_DEVICE_KERNEL void RT_RG_NAME(combineTemporalNeighbors)() {
 
         plp.s->reservoirBuffer[curResIndex][launchIndex] = combinedReservoir;
 
-        plp.s->rngBuffer[launchIndex] = rng;
+        plp.s->rngBuffer.write(launchIndex, rng);
     }
 }
 
@@ -770,7 +772,7 @@ CUDA_DEVICE_KERNEL void RT_RG_NAME(combineTemporalNeighbors)() {
 CUDA_DEVICE_KERNEL void RT_RG_NAME(combineSpatialNeighbors)() {
     int2 launchIndex = make_int2(optixGetLaunchIndex().x, optixGetLaunchIndex().y);
 
-    PCG32RNG rng = plp.s->rngBuffer[launchIndex];
+    PCG32RNG rng = plp.s->rngBuffer.read(launchIndex);
 
     uint32_t bufIdx = plp.f->bufferIndex;
     GBuffer0 gBuffer0 = plp.s->GBuffer0[bufIdx].read(launchIndex);
@@ -839,7 +841,7 @@ CUDA_DEVICE_KERNEL void RT_RG_NAME(combineSpatialNeighbors)() {
 
         plp.s->reservoirBuffer[dstResIndex][launchIndex] = combinedReservoir;
 
-        plp.s->rngBuffer[launchIndex] = rng;
+        plp.s->rngBuffer.write(launchIndex, rng);
     }
 }
 

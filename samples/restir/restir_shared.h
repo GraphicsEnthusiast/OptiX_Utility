@@ -318,7 +318,7 @@ namespace Shared {
     
     struct StaticPipelineLaunchParameters {
         int2 imageSize;
-        optixu::BlockBuffer2D<PCG32RNG, 1> rngBuffer;
+        optixu::NativeBlockBuffer2D<PCG32RNG> rngBuffer;
 
         optixu::NativeBlockBuffer2D<GBuffer0> GBuffer0[2];
         optixu::NativeBlockBuffer2D<GBuffer1> GBuffer1[2];

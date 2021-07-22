@@ -1573,7 +1573,7 @@ int32_t main(int32_t argc, const char* argv[]) try {
     cudau::TypedBuffer<float2> linearFlowBuffer;
     cudau::TypedBuffer<float4> linearDenoisedBeautyBuffer;
 
-    optixu::HostBlockBuffer2D<Shared::PCG32RNG, 1> rngBuffer;
+    cudau::Array rngBuffer;
 
     const auto initializeScreenRelatedBuffers = [&]() {
         for (int i = 0; i < 2; ++i) {
@@ -1615,13 +1615,16 @@ int32_t main(int32_t argc, const char* argv[]) try {
         linearDenoisedBeautyBuffer.initialize(gpuEnv.cuContext, GPUEnvironment::bufferType,
                                               renderTargetSizeX * renderTargetSizeY);
 
-        rngBuffer.initialize(gpuEnv.cuContext, GPUEnvironment::bufferType, renderTargetSizeX, renderTargetSizeY);
+        rngBuffer.initialize2D(
+            gpuEnv.cuContext, cudau::ArrayElementType::UInt32, (sizeof(Shared::PCG32RNG) + 3) / 4,
+            cudau::ArraySurface::Enable, cudau::ArrayTextureGather::Disable,
+            renderTargetSizeX, renderTargetSizeY, 1);
         {
-            rngBuffer.map();
+            auto rngs = rngBuffer.map<Shared::PCG32RNG>();
             std::mt19937_64 rngSeed(591842031321323413);
             for (int y = 0; y < renderTargetSizeY; ++y) {
                 for (int x = 0; x < renderTargetSizeX; ++x) {
-                    Shared::PCG32RNG &rng = rngBuffer(x, y);
+                    Shared::PCG32RNG &rng = rngs[y * renderTargetSizeX + x];
                     rng.setState(rngSeed());
                 }
             }
@@ -1672,11 +1675,11 @@ int32_t main(int32_t argc, const char* argv[]) try {
 
         rngBuffer.resize(width, height);
         {
-            rngBuffer.map();
+            auto rngs = rngBuffer.map<Shared::PCG32RNG>();
             std::mt19937_64 rngSeed(591842031321323413);
             for (int y = 0; y < height; ++y) {
                 for (int x = 0; x < width; ++x) {
-                    Shared::PCG32RNG &rng = rngBuffer(x, y);
+                    Shared::PCG32RNG &rng = rngs[y * renderTargetSizeX + x];
                     rng.setState(rngSeed());
                 }
             }
@@ -1824,7 +1827,7 @@ int32_t main(int32_t argc, const char* argv[]) try {
 
     Shared::StaticPipelineLaunchParameters staticPlp = {};
     staticPlp.imageSize = int2(renderTargetSizeX, renderTargetSizeY);
-    staticPlp.rngBuffer = rngBuffer.getBlockBuffer2D();
+    staticPlp.rngBuffer = rngBuffer.getSurfaceObject(0);
     staticPlp.GBuffer0[0] = gBuffer0[0].getSurfaceObject(0);
     staticPlp.GBuffer0[1] = gBuffer0[1].getSurfaceObject(0);
     staticPlp.GBuffer1[0] = gBuffer1[0].getSurfaceObject(0);
@@ -1969,7 +1972,7 @@ int32_t main(int32_t argc, const char* argv[]) try {
 
             // EN: update the pipeline parameters.
             staticPlp.imageSize = int2(renderTargetSizeX, renderTargetSizeY);
-            staticPlp.rngBuffer = rngBuffer.getBlockBuffer2D();
+            staticPlp.rngBuffer = rngBuffer.getSurfaceObject(0);
             staticPlp.GBuffer0[0] = gBuffer0[0].getSurfaceObject(0);
             staticPlp.GBuffer0[1] = gBuffer0[1].getSurfaceObject(0);
             staticPlp.GBuffer1[0] = gBuffer1[0].getSurfaceObject(0);
