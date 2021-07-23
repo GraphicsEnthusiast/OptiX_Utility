@@ -673,7 +673,7 @@ CUDA_DEVICE_KERNEL void RT_CH_NAME(primary)() {
     }
     reservoir.calcRecPDFValue();
 
-    if (!evaluateVisibility(p, shadingFrame, reservoir.getSample()))
+    if (!evaluateVisibility(p, shadingFrame, reservoir.getSample()) && plp.f->reuseVisibility)
         reservoir.setRecPDFValue(0.0f);
 
     //uint32_t linearIndex = launchIndex.y * plp.imageSize.x + launchIndex.x;

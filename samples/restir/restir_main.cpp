@@ -2111,6 +2111,7 @@ int32_t main(int32_t argc, const char* argv[]) try {
         static int32_t numSpatialNeighbors = 5;
         static float spatialNeighborRadius = 20.0f;
         static bool useLowDiscrepancySpatialNeighbors = true;
+        static bool reuseVisibility = true;
         {
             ImGui::Begin("Debug", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
 
@@ -2171,8 +2172,16 @@ int32_t main(int32_t argc, const char* argv[]) try {
             ImGui::SliderInt("#Spatial Neighbors", &numSpatialNeighbors, 1, 10);
             ImGui::SliderFloat("Radius", &spatialNeighborRadius, 3.0f, 30.0f);
             ImGui::Checkbox("Low Discrepancy", &useLowDiscrepancySpatialNeighbors);
+            ImGui::Checkbox("Reuse Visibility", &reuseVisibility);
 
             ImGui::Separator();
+
+            ImGui::Text("Buffer to Display");
+            ImGui::RadioButtonE("Noisy Beauty", &bufferTypeToDisplay, Shared::BufferToDisplay::NoisyBeauty);
+            ImGui::RadioButtonE("Albedo", &bufferTypeToDisplay, Shared::BufferToDisplay::Albedo);
+            ImGui::RadioButtonE("Normal", &bufferTypeToDisplay, Shared::BufferToDisplay::Normal);
+            ImGui::RadioButtonE("Flow", &bufferTypeToDisplay, Shared::BufferToDisplay::Flow);
+            ImGui::RadioButtonE("Denoised Beauty", &bufferTypeToDisplay, Shared::BufferToDisplay::DenoisedBeauty);
 
             if (ImGui::Checkbox("Temporal Denoiser", &useTemporalDenosier)) {
                 CUDADRV_CHECK(cuStreamSynchronize(cuStream));
@@ -2201,13 +2210,6 @@ int32_t main(int32_t argc, const char* argv[]) try {
 
                 denoiser.setupState(cuStream, denoiserStateBuffer, denoiserScratchBuffer);
             }
-
-            ImGui::Text("Buffer to Display");
-            ImGui::RadioButtonE("Noisy Beauty", &bufferTypeToDisplay, Shared::BufferToDisplay::NoisyBeauty);
-            ImGui::RadioButtonE("Albedo", &bufferTypeToDisplay, Shared::BufferToDisplay::Albedo);
-            ImGui::RadioButtonE("Normal", &bufferTypeToDisplay, Shared::BufferToDisplay::Normal);
-            ImGui::RadioButtonE("Flow", &bufferTypeToDisplay, Shared::BufferToDisplay::Flow);
-            ImGui::RadioButtonE("Denoised Beauty", &bufferTypeToDisplay, Shared::BufferToDisplay::DenoisedBeauty);
 
             ImGui::SliderFloat("Motion Vector Scale", &motionVectorScale, -2.0f, 2.0f);
 
@@ -2280,6 +2282,7 @@ int32_t main(int32_t argc, const char* argv[]) try {
         perFramePlp.log2NumCandidateSamples = log2NumCandidateSamples;
         perFramePlp.numSpatialNeighbors = numSpatialNeighbors;
         perFramePlp.useLowDiscrepancyNeighbors = useLowDiscrepancySpatialNeighbors;
+        perFramePlp.reuseVisibility = reuseVisibility;
         perFramePlp.bufferIndex = bufferIndex;
         perFramePlp.resetFlowBuffer = resetFlowBuffer;
 

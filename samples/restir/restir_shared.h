@@ -353,6 +353,7 @@ namespace Shared {
         unsigned int log2NumCandidateSamples : 4;
         unsigned int numSpatialNeighbors : 4;
         unsigned int useLowDiscrepancyNeighbors : 1;
+        unsigned int reuseVisibility : 1;
         unsigned int bufferIndex : 1;
         unsigned int resetFlowBuffer : 1;
     };
