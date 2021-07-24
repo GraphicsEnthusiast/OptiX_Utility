@@ -930,28 +930,35 @@ void createTriangleMeshes(const std::filesystem::path &filePath,
             emittanceScale = float3(0.0f);
         }
 
-        float emitScale = 10;
         if (matName == "Paris_StringLights_01_White_Color") {
-            emittanceScale = emitScale * float3(20, 20, 20);
+            emittanceScale = float3(20, 20, 20);
         }
         else if (matName == "Paris_StringLights_01_Green_Color") {
-            emittanceScale = emitScale * float3(0, 50, 0);
+            emittanceScale = float3(0, 50, 0);
         }
         else if (matName == "Paris_StringLights_01_Red_Color") {
-            emittanceScale = emitScale * float3(50, 0, 0);
+            emittanceScale = float3(50, 0, 0);
         }
         if (matName == "Paris_StringLights_01_Blue_Color") {
-            emittanceScale = emitScale * float3(0, 0, 50);
+            emittanceScale = float3(0, 0, 50);
         }
         else if (matName == "Paris_StringLights_01_Pink_Color") {
-            emittanceScale = emitScale * float3(30, 10, 10);
+            emittanceScale = float3(30, 10, 10);
         }
         else if (matName == "Paris_StringLights_01_Orange_Color") {
-            emittanceScale = emitScale * float3(35, 15, 0);
+            emittanceScale = float3(35, 15, 0);
         }
         else if (matName == "Streetlight_Glass") {
-            emittanceScale = emitScale * float3(35, 30, 20);
+            emittanceScale = float3(35, 30, 20);
         }
+        else if (matName == "Lantern") {
+            emittancePath = dirPath / "../PropTextures/Street/Paris_Lantern_01/Paris_Lantern_01A_emi.png";
+            emittanceScale = float3(35, 20, 5);
+        }
+        else if (matName == "MASTER_Focus_Glass") {
+            emittanceScale = float3(35, 30, 30);
+        }
+        emittanceScale *= 10;
 
         materials.push_back(createLambertMaterial(
             gpuEnv,
@@ -2101,7 +2108,8 @@ int32_t main(int32_t argc, const char* argv[]) try {
         static bool useTemporalDenosier = true;
         static Shared::BufferToDisplay bufferTypeToDisplay = Shared::BufferToDisplay::NoisyBeauty;
         static float motionVectorScale = -1.0f;
-        static bool animate = true;
+        static bool animate = false;// true;
+        bool resetAccumulation = false;
         bool lastFrameWasAnimated = false;
         static int32_t log2NumCandidateSamples = 4;
         static int32_t log2NumSamples = 0;
@@ -2120,6 +2128,9 @@ int32_t main(int32_t argc, const char* argv[]) try {
                     lastFrameWasAnimated = true;
                 animate = !animate;
             }
+            ImGui::SameLine();
+            if (ImGui::Button("Reset Accum"))
+                resetAccumulation = true;
 
             ImGui::Separator();
             ImGui::Text("Cursor Info:");
@@ -2266,7 +2277,7 @@ int32_t main(int32_t argc, const char* argv[]) try {
             perFramePlp.travHandle = ias.rebuild(cuStream, iasInstanceBuffer, iasMem, asScratchMem);
         curGPUTimer.update.stop(cuStream);
 
-        bool firstAccumFrame = animate || cameraIsActuallyMoving || resized || frameIndex == 0;
+        bool firstAccumFrame = animate || cameraIsActuallyMoving || resized || frameIndex == 0 || resetAccumulation;
         bool resetFlowBuffer = resized || frameIndex == 0;
         static uint32_t numAccumFrames = 0;
         if (firstAccumFrame)

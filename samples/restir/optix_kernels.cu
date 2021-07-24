@@ -681,6 +681,12 @@ CUDA_DEVICE_KERNEL void RT_CH_NAME(primary)() {
     plp.s->reservoirBuffer[curResIndex][launchIndex] = reservoir;
 }
 
+//CUDA_DEVICE_KERNEL void RT_AH_NAME(primary)() {
+//    auto sbtr = HitGroupSBTRecordData::get();
+//    const GeometryInstanceData &geomInst = sbtr.geomInstData;
+//    const MaterialData &mat = plp.s->materialDataBuffer[geomInst.materialSlot];
+//}
+
 
 
 CUDA_DEVICE_FUNCTION bool testNeighbor(
