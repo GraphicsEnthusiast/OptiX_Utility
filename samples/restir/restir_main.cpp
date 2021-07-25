@@ -1156,6 +1156,34 @@ namespace ImGui {
     bool RadioButtonE(const char* label, EnumType* v, EnumType v_button) {
         return RadioButton(label, reinterpret_cast<int*>(v), static_cast<int>(v_button));
     }
+
+    bool InputLog2Int(const char* label, int* v, int max_v) {
+        float buttonSize = GetFrameHeight();
+        float itemInnerSpacingX = GetStyle().ItemInnerSpacing.x;
+
+        BeginGroup();
+        PushID(label);
+
+        ImGui::AlignTextToFramePadding();
+        SetNextItemWidth(std::max(1.0f, CalcItemWidth() - (buttonSize + itemInnerSpacingX) * 2));
+        Text("%s: %u", label, 1 << *v);
+        bool changed = false;
+        SameLine(0, itemInnerSpacingX);
+        if (Button("-", ImVec2(buttonSize, buttonSize))) {
+            *v = std::max(*v - 1, 0);
+            changed = true;
+        }
+        SameLine(0, itemInnerSpacingX);
+        if (Button("+", ImVec2(buttonSize, buttonSize))) {
+            *v = std::min(*v + 1, max_v);
+            changed = true;
+        }
+
+        PopID();
+        EndGroup();
+
+        return changed;
+    }
 }
 
 int32_t main(int32_t argc, const char* argv[]) try {
@@ -1569,6 +1597,7 @@ int32_t main(int32_t argc, const char* argv[]) try {
     cudau::Array gBuffer2[2];
 
     optixu::HostBlockBuffer2D<Shared::Reservoir<Shared::LightSample>, 1> reservoirBuffer[2];
+    cudau::Array reservoirInfoBuffer[2];
     
     cudau::Array beautyAccumBuffer;
     cudau::Array albedoAccumBuffer;
@@ -1599,6 +1628,10 @@ int32_t main(int32_t argc, const char* argv[]) try {
 
             reservoirBuffer[i].initialize(gpuEnv.cuContext, GPUEnvironment::bufferType,
                                           renderTargetSizeX, renderTargetSizeY);
+            reservoirInfoBuffer[i].initialize2D(
+                gpuEnv.cuContext, cudau::ArrayElementType::UInt32, (sizeof(Shared::ReservoirInfo) + 3) / 4,
+                cudau::ArraySurface::Enable, cudau::ArrayTextureGather::Disable,
+                renderTargetSizeX, renderTargetSizeY, 1);
         }
 
         beautyAccumBuffer.initialize2D(gpuEnv.cuContext, cudau::ArrayElementType::Float32, 4,
@@ -1653,6 +1686,7 @@ int32_t main(int32_t argc, const char* argv[]) try {
         beautyAccumBuffer.finalize();
 
         for (int i = 1; i >= 0; --i) {
+            reservoirInfoBuffer[i].finalize();
             reservoirBuffer[i].finalize();
 
             gBuffer2[i].finalize();
@@ -1667,6 +1701,7 @@ int32_t main(int32_t argc, const char* argv[]) try {
             gBuffer1[i].resize(width, height);
             gBuffer2[i].resize(width, height);
 
+            reservoirBuffer[i].resize(renderTargetSizeX, renderTargetSizeY);
             reservoirBuffer[i].resize(renderTargetSizeX, renderTargetSizeY);
         }
 
@@ -1843,6 +1878,8 @@ int32_t main(int32_t argc, const char* argv[]) try {
     staticPlp.GBuffer2[1] = gBuffer2[1].getSurfaceObject(0);
     staticPlp.reservoirBuffer[0] = reservoirBuffer[0].getBlockBuffer2D();
     staticPlp.reservoirBuffer[1] = reservoirBuffer[1].getBlockBuffer2D();
+    staticPlp.reservoirInfoBuffer[0] = reservoirInfoBuffer[0].getSurfaceObject(0);
+    staticPlp.reservoirInfoBuffer[1] = reservoirInfoBuffer[1].getSurfaceObject(0);
     staticPlp.spatialNeighborDeltas = spatialNeighborDeltas.getDevicePointer();
     staticPlp.materialDataBuffer = gpuEnv.materialDataBuffer.getDevicePointer();
     staticPlp.geometryInstanceDataBuffer = gpuEnv.geomInstDataBuffer.getDevicePointer();
@@ -2111,12 +2148,15 @@ int32_t main(int32_t argc, const char* argv[]) try {
         static bool animate = false;// true;
         bool resetAccumulation = false;
         bool lastFrameWasAnimated = false;
-        static int32_t log2NumCandidateSamples = 4;
+        static bool useUnbiasedEstimator = false;
+        static int32_t log2NumCandidateSamples = 5;
         static int32_t log2NumSamples = 0;
         static bool enableTemporalReuse = true;
         static bool enableSpatialReuse = true;
-        static int32_t numSpatialReusePasses = 2;
-        static int32_t numSpatialNeighbors = 5;
+        static int32_t numSpatialReusePassesBiased = 2;
+        static int32_t numSpatialReusePassesUnbiased = 1;
+        static int32_t numSpatialNeighborsBiased = 5;
+        static int32_t numSpatialNeighborsUnbiased = 3;
         static float spatialNeighborRadius = 20.0f;
         static bool useLowDiscrepancySpatialNeighbors = true;
         static bool reuseVisibility = true;
@@ -2159,28 +2199,19 @@ int32_t main(int32_t argc, const char* argv[]) try {
                         pickInfoOnHost.emittance.z);
             ImGui::Separator();
 
-            ImGui::PushID("Candidates");
-            ImGui::Text("#Candidates: %u", 1 << log2NumCandidateSamples); ImGui::SameLine();
-            if (ImGui::Button("-"))
-                log2NumCandidateSamples = std::max(log2NumCandidateSamples - 1, 0);
-            ImGui::SameLine();
-            if (ImGui::Button("+"))
-                log2NumCandidateSamples = std::min(log2NumCandidateSamples + 1, 8);
-            ImGui::PopID();
+            resetAccumulation |= ImGui::Checkbox("Unbiased", &useUnbiasedEstimator);
 
-            ImGui::PushID("Samples");
-            ImGui::Text("#Samples: %u", 1 << log2NumSamples); ImGui::SameLine();
-            if (ImGui::Button("-"))
-                log2NumSamples = std::max(log2NumSamples - 1, 0);
-            ImGui::SameLine();
-            if (ImGui::Button("+"))
-                log2NumSamples = std::min({ log2NumSamples + 1, log2NumCandidateSamples, 3 });
-            ImGui::PopID();
+            ImGui::InputLog2Int("#Candidates", &log2NumCandidateSamples, 8);
+            ImGui::InputLog2Int("#Samples", &log2NumSamples, 3);
 
             ImGui::Checkbox("Temporal Reuse", &enableTemporalReuse);
             ImGui::Checkbox("Spatial Reuse", &enableSpatialReuse);
-            ImGui::SliderInt("#Spatial Reuse Passes", &numSpatialReusePasses, 1, 5);
-            ImGui::SliderInt("#Spatial Neighbors", &numSpatialNeighbors, 1, 10);
+            ImGui::SliderInt("#Spatial Reuse Passes",
+                             useUnbiasedEstimator ? &numSpatialReusePassesUnbiased : &numSpatialReusePassesBiased,
+                             1, 5);
+            ImGui::SliderInt("#Spatial Neighbors",
+                             useUnbiasedEstimator ? &numSpatialNeighborsUnbiased : &numSpatialNeighborsBiased,
+                             1, 10);
             ImGui::SliderFloat("Radius", &spatialNeighborRadius, 3.0f, 30.0f);
             ImGui::Checkbox("Low Discrepancy", &useLowDiscrepancySpatialNeighbors);
             ImGui::Checkbox("Reuse Visibility", &reuseVisibility);
@@ -2290,8 +2321,9 @@ int32_t main(int32_t argc, const char* argv[]) try {
         perFramePlp.mousePosition = int2(static_cast<int32_t>(g_mouseX),
                                          static_cast<int32_t>(g_mouseY));
         perFramePlp.pickInfo = pickInfos[bufferIndex].getDevicePointer();
+        perFramePlp.useUnbiasedEstimator = useUnbiasedEstimator;
         perFramePlp.log2NumCandidateSamples = log2NumCandidateSamples;
-        perFramePlp.numSpatialNeighbors = numSpatialNeighbors;
+        perFramePlp.numSpatialNeighbors = numSpatialNeighborsBiased;
         perFramePlp.useLowDiscrepancyNeighbors = useLowDiscrepancySpatialNeighbors;
         perFramePlp.reuseVisibility = reuseVisibility;
         perFramePlp.bufferIndex = bufferIndex;
@@ -2318,15 +2350,18 @@ int32_t main(int32_t argc, const char* argv[]) try {
 
         if (enableSpatialReuse) {
             gpuEnv.pipeline.setRayGenerationProgram(gpuEnv.combineSpatialNeighborsRayGenProgram);
+            int32_t numSpatialReusePasses = useUnbiasedEstimator ?
+                numSpatialReusePassesUnbiased :
+                numSpatialReusePassesBiased;
             for (int i = 0; i < numSpatialReusePasses; ++i) {
                 plp.currentReservoirIndex = currentReservoirIndex;
-                plp.spatialNeighborBaseIndex = lastSpatialNeighborBaseIndex + numSpatialNeighbors * i;
+                plp.spatialNeighborBaseIndex = lastSpatialNeighborBaseIndex + numSpatialNeighborsBiased * i;
                 CUDADRV_CHECK(cuMemcpyHtoDAsync(plpOnDevice, &plp, sizeof(plp), cuStream));
                 gpuEnv.pipeline.launch(cuStream, plpOnDevice, renderTargetSizeX, renderTargetSizeY, 1);
                 currentReservoirIndex = (currentReservoirIndex + 1) % 2;
                 CUDADRV_CHECK(cuStreamSynchronize(cuStream));
             }
-            lastSpatialNeighborBaseIndex += numSpatialNeighbors * numSpatialReusePasses;
+            lastSpatialNeighborBaseIndex += numSpatialNeighborsBiased * numSpatialReusePasses;
         }
 
         plp.currentReservoirIndex = currentReservoirIndex;

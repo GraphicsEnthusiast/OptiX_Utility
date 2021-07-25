@@ -238,23 +238,19 @@ namespace Shared {
         SampleType m_sample;
         FloatSum m_sumWeights;
         uint32_t m_streamLength;
-        float m_targetDensityValue;
-        float m_recPDFValue;
 
     public:
         CUDA_DEVICE_FUNCTION void initialize() {
             m_sumWeights = 0;
             m_streamLength = 0;
-            m_targetDensityValue = 0;
-            m_recPDFValue = 0;
         }
-        CUDA_DEVICE_FUNCTION void update(const SampleType &newSample, float targetDensity, float weight, float u) {
+        CUDA_DEVICE_FUNCTION bool update(const SampleType &newSample, float weight, float u) {
             m_sumWeights += weight;
-            if (u < weight / m_sumWeights) {
+            bool accepted = u < weight / m_sumWeights;
+            if (accepted)
                 m_sample = newSample;
-                m_targetDensityValue = targetDensity;
-            }
             ++m_streamLength;
+            return accepted;
         }
 
         CUDA_DEVICE_FUNCTION LightSample getSample() const {
@@ -269,18 +265,11 @@ namespace Shared {
         CUDA_DEVICE_FUNCTION void setStreamLength(uint32_t length) {
             m_streamLength = length;
         }
+    };
 
-        CUDA_DEVICE_FUNCTION void calcRecPDFValue() {
-            m_recPDFValue = m_sumWeights / (m_targetDensityValue * m_streamLength);
-            if (!isfinite(m_recPDFValue))
-                m_recPDFValue = 0;
-        }
-        CUDA_DEVICE_FUNCTION float getRecPDFValue() const {
-            return m_recPDFValue;
-        }
-        CUDA_DEVICE_FUNCTION void setRecPDFValue(float v) {
-            m_recPDFValue = v;
-        }
+    struct ReservoirInfo {
+        float recPDFEstimate;
+        float targetDensity;
     };
 
 
@@ -325,6 +314,7 @@ namespace Shared {
         optixu::NativeBlockBuffer2D<GBuffer2> GBuffer2[2];
 
         optixu::BlockBuffer2D<Reservoir<LightSample>, 1> reservoirBuffer[2];
+        optixu::NativeBlockBuffer2D<ReservoirInfo> reservoirInfoBuffer[2];
         const float2* spatialNeighborDeltas;
 
         const MaterialData* materialDataBuffer;
@@ -350,6 +340,7 @@ namespace Shared {
         int2 mousePosition;
         PickInfo* pickInfo;
 
+        unsigned int useUnbiasedEstimator : 1;
         unsigned int log2NumCandidateSamples : 4;
         unsigned int numSpatialNeighbors : 4;
         unsigned int useLowDiscrepancyNeighbors : 1;

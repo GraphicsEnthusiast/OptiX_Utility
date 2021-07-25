@@ -658,6 +658,7 @@ CUDA_DEVICE_KERNEL void RT_CH_NAME(primary)() {
     Reservoir<LightSample> reservoir = plp.s->reservoirBuffer[curResIndex][launchIndex];
 
     reservoir.initialize();
+    float cachedTargetDensity = 0.0f;
     uint32_t numCandidates = 1 << plp.f->log2NumCandidateSamples;
     for (int i = 0; i < numCandidates; ++i) {
         LightSample lightSample;
@@ -669,16 +670,23 @@ CUDA_DEVICE_KERNEL void RT_CH_NAME(primary)() {
         float targetDensity = convertToWeight(cont); // unnormalized
         float weight = targetDensity / probDensity;
 
-        reservoir.update(lightSample, targetDensity, weight, rng.getFloat0cTo1o());
+        if (reservoir.update(lightSample, weight, rng.getFloat0cTo1o()))
+            cachedTargetDensity = targetDensity;
     }
-    reservoir.calcRecPDFValue();
+
+    ReservoirInfo reservoirInfo;
+    reservoirInfo.recPDFEstimate = reservoir.getSumWeights() / (cachedTargetDensity * reservoir.getStreamLength());
+    if (!isfinite(reservoirInfo.recPDFEstimate))
+        reservoirInfo.recPDFEstimate = 0;
+    reservoirInfo.targetDensity = cachedTargetDensity;
 
     if (!evaluateVisibility(p, shadingFrame, reservoir.getSample()) && plp.f->reuseVisibility)
-        reservoir.setRecPDFValue(0.0f);
+        reservoirInfo.recPDFEstimate = 0.0f;
 
     //uint32_t linearIndex = launchIndex.y * plp.imageSize.x + launchIndex.x;
     plp.s->rngBuffer.write(launchIndex, rng);
     plp.s->reservoirBuffer[curResIndex][launchIndex] = reservoir;
+    plp.s->reservoirInfoBuffer[curResIndex].write(launchIndex, reservoirInfo);
 }
 
 //CUDA_DEVICE_KERNEL void RT_AH_NAME(primary)() {
@@ -741,12 +749,16 @@ CUDA_DEVICE_KERNEL void RT_RG_NAME(combineTemporalNeighbors)() {
         uint32_t curResIndex = plp.currentReservoirIndex;
         uint32_t prevResIndex = (curResIndex + 1) % 2;
 
+        float cachedTargetDensity = 0.0f;
         Reservoir<LightSample> combinedReservoir;
         combinedReservoir.initialize();
 
         Reservoir<LightSample> self = plp.s->reservoirBuffer[curResIndex][launchIndex];
-        if (self.getRecPDFValue() > 0.0f)
+        ReservoirInfo selfResInfo = plp.s->reservoirInfoBuffer[curResIndex].read(launchIndex);
+        if (selfResInfo.recPDFEstimate > 0.0f) {
             combinedReservoir = self;
+            cachedTargetDensity = selfResInfo.targetDensity;
+        }
         uint32_t combinedStreamLength = self.getStreamLength();
         uint32_t maxNumPrevSamples = 20 * self.getStreamLength();
 
@@ -754,20 +766,29 @@ CUDA_DEVICE_KERNEL void RT_RG_NAME(combineTemporalNeighbors)() {
                                        launchIndex.y + 0.5f - motionVector.y);
         if (testNeighbor(prevBufIdx, neighborIndex, dist, normalInWorld)) {
             const Reservoir<LightSample> &neighbor = plp.s->reservoirBuffer[prevResIndex][neighborIndex];
+            const ReservoirInfo &neighborInfo = plp.s->reservoirInfoBuffer[prevBufIdx].read(neighborIndex);
 
             LightSample lightSample = neighbor.getSample();
             float3 cont = evaluateUnshadowedContribution(positionInWorld, vOutLocal, shadingFrame, bsdf, lightSample);
             float targetDensity = convertToWeight(cont); // unnormalized
             uint32_t streamLength = min(neighbor.getStreamLength(), maxNumPrevSamples);
-            float weight = targetDensity * neighbor.getRecPDFValue() * streamLength;
-            combinedReservoir.update(lightSample, targetDensity, weight, rng.getFloat0cTo1o());
+            float weight = targetDensity * neighborInfo.recPDFEstimate * streamLength;
+            if (combinedReservoir.update(lightSample, weight, rng.getFloat0cTo1o()))
+                cachedTargetDensity = targetDensity;
 
             combinedStreamLength += streamLength;
         }
         combinedReservoir.setStreamLength(combinedStreamLength);
-        combinedReservoir.calcRecPDFValue();
+
+        ReservoirInfo reservoirInfo;
+        reservoirInfo.recPDFEstimate = combinedReservoir.getSumWeights() /
+            (cachedTargetDensity * combinedReservoir.getStreamLength());
+        if (!isfinite(reservoirInfo.recPDFEstimate))
+            reservoirInfo.recPDFEstimate = 0;
+        reservoirInfo.targetDensity = cachedTargetDensity;
 
         plp.s->reservoirBuffer[curResIndex][launchIndex] = combinedReservoir;
+        plp.s->reservoirInfoBuffer[curResIndex].write(launchIndex, reservoirInfo);
 
         plp.s->rngBuffer.write(launchIndex, rng);
     }
@@ -804,12 +825,16 @@ CUDA_DEVICE_KERNEL void RT_RG_NAME(combineSpatialNeighbors)() {
         uint32_t srcResIndex = plp.currentReservoirIndex;
         uint32_t dstResIndex = (srcResIndex + 1) % 2;
 
+        float cachedTargetDensity = 0.0f;
         Reservoir<LightSample> combinedReservoir;
         combinedReservoir.initialize();
 
         Reservoir<LightSample> self = plp.s->reservoirBuffer[srcResIndex][launchIndex];
-        if (self.getRecPDFValue() > 0.0f)
+        ReservoirInfo selfResInfo = plp.s->reservoirInfoBuffer[srcResIndex].read(launchIndex);
+        if (selfResInfo.recPDFEstimate > 0.0f) {
             combinedReservoir = self;
+            cachedTargetDensity = selfResInfo.targetDensity;
+        }
         uint32_t combinedStreamLength = self.getStreamLength();
 
         for (int nIdx = 0; nIdx < plp.f->numSpatialNeighbors; ++nIdx) {
@@ -831,21 +856,30 @@ CUDA_DEVICE_KERNEL void RT_RG_NAME(combineSpatialNeighbors)() {
             if (testNeighbor(bufIdx, neighborIndex, dist, normalInWorld) &&
                 (neighborIndex.x != launchIndex.x || neighborIndex.y != launchIndex.y)) {
                 Reservoir<LightSample> neighbor = plp.s->reservoirBuffer[srcResIndex][neighborIndex];
+                const ReservoirInfo &neighborInfo = plp.s->reservoirInfoBuffer[srcResIndex].read(neighborIndex);
 
                 LightSample lightSample = neighbor.getSample();
                 float3 cont = evaluateUnshadowedContribution(positionInWorld, vOutLocal, shadingFrame, bsdf, lightSample);
                 float targetDensity = convertToWeight(cont); // unnormalized
                 uint32_t streamLength = neighbor.getStreamLength();
-                float weight = targetDensity * neighbor.getRecPDFValue() * streamLength;
-                combinedReservoir.update(lightSample, targetDensity, weight, rng.getFloat0cTo1o());
+                float weight = targetDensity * neighborInfo.recPDFEstimate * streamLength;
+                if (combinedReservoir.update(lightSample, weight, rng.getFloat0cTo1o()))
+                    cachedTargetDensity = targetDensity;
 
                 combinedStreamLength += streamLength;
             }
         }
         combinedReservoir.setStreamLength(combinedStreamLength);
-        combinedReservoir.calcRecPDFValue();
+
+        ReservoirInfo reservoirInfo;
+        reservoirInfo.recPDFEstimate = combinedReservoir.getSumWeights() /
+            (cachedTargetDensity * combinedReservoir.getStreamLength());
+        if (!isfinite(reservoirInfo.recPDFEstimate))
+            reservoirInfo.recPDFEstimate = 0;
+        reservoirInfo.targetDensity = cachedTargetDensity;
 
         plp.s->reservoirBuffer[dstResIndex][launchIndex] = combinedReservoir;
+        plp.s->reservoirInfoBuffer[dstResIndex].write(launchIndex, reservoirInfo);
 
         plp.s->rngBuffer.write(launchIndex, rng);
     }
@@ -918,6 +952,7 @@ CUDA_DEVICE_KERNEL void RT_RG_NAME(shading)() {
 
         uint32_t curResIndex = plp.currentReservoirIndex;
         const Reservoir<LightSample> &reservoir = plp.s->reservoirBuffer[curResIndex][launchIndex];
+        const ReservoirInfo &reservoirInfo = plp.s->reservoirInfoBuffer[curResIndex].read(launchIndex);
 
         contribution = make_float3(0.0f);
         if (vOutLocal.z > 0) {
@@ -931,10 +966,10 @@ CUDA_DEVICE_KERNEL void RT_RG_NAME(shading)() {
 
         uint32_t numCandidateSamples = 1 << plp.f->log2NumCandidateSamples;
         const LightSample &lightSample = reservoir.getSample();
-        float recPDFValue = reservoir.getRecPDFValue();
         float3 directCont = make_float3(0.0f);
-        if (recPDFValue > 0 && isfinite(recPDFValue))
-            directCont = recPDFValue * performDirectLighting(positionInWorld, vOutLocal, shadingFrame, bsdf, lightSample);
+        float recPDFEstimate = reservoirInfo.recPDFEstimate;
+        if (recPDFEstimate > 0 && isfinite(recPDFEstimate))
+            directCont = recPDFEstimate * performDirectLighting(positionInWorld, vOutLocal, shadingFrame, bsdf, lightSample);
 
         contribution += directCont;
 
