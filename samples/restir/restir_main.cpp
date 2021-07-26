@@ -658,6 +658,7 @@ struct GeometryGroup {
 
     optixu::GeometryAccelerationStructure optixGas;
     cudau::Buffer optixGasMem;
+    uint32_t numEmitterPrimitives;
 };
 
 struct Instance {
@@ -839,10 +840,15 @@ GeometryGroup* createGeometryGroup(
     const std::set<const GeometryInstance*> &geomInsts) {
     GeometryGroup* geomGroup = new GeometryGroup();
     geomGroup->geomInsts = geomInsts;
+    geomGroup->numEmitterPrimitives = 0;
 
     geomGroup->optixGas = gpuEnv.scene.createGeometryAccelerationStructure();
-    for (auto it = geomInsts.cbegin(); it != geomInsts.cend(); ++it)
-        geomGroup->optixGas.addChild((*it)->optixGeomInst);
+    for (auto it = geomInsts.cbegin(); it != geomInsts.cend(); ++it) {
+        const GeometryInstance* geominst = *it;
+        geomGroup->optixGas.addChild(geominst->optixGeomInst);
+        if (geominst->mat->emittanceScale != float3(0.0f))
+            geomGroup->numEmitterPrimitives += geominst->triangleBuffer.numElements();
+    }
     geomGroup->optixGas.setNumMaterialSets(1);
     geomGroup->optixGas.setNumRayTypes(0, Shared::NumRayTypes);
 
@@ -1614,15 +1620,18 @@ int32_t main(int32_t argc, const char* argv[]) try {
 
     CUDADRV_CHECK(cuStreamSynchronize(cuStream));
 
+    uint32_t totalNumEmitterPrimitives = 0;
     std::vector<float> lightImportances(insts.size());
     for (int i = 0; i < insts.size(); ++i) {
         const Instance* inst = insts[i];
         lightImportances[i] = inst->lightGeomInstDist.getIntengral();
+        totalNumEmitterPrimitives += inst->geomGroup->numEmitterPrimitives;
     }
     DiscreteDistribution1D lightInstDist;
     lightInstDist.initialize(gpuEnv.cuContext, GPUEnvironment::bufferType,
                              lightImportances.data(), lightImportances.size());
     Assert(lightInstDist.getIntengral() > 0, "No lights!");
+    hpprintf("%u emitter primitives\n", totalNumEmitterPrimitives);
 
     // END: Setup a scene.
     // ----------------------------------------------------------------
