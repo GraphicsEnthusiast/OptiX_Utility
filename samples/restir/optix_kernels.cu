@@ -421,17 +421,6 @@ CUDA_DEVICE_FUNCTION float3 sampleLight(float ul, float u0, float u1,
     lightProb *= primProb;
     lightSample->primIndex = primIndex;
 
-    //printf("%u-%u-%u: %g\n", instIndex, geomInstIndex, primIndex, lightProb);
-
-    const MaterialData &mat = plp.s->materialDataBuffer[geomInst.materialSlot];
-
-    const Shared::Triangle &tri = geomInst.triangleBuffer[primIndex];
-    const Shared::Vertex (&v)[3] = {
-        geomInst.vertexBuffer[tri.index0],
-        geomInst.vertexBuffer[tri.index1],
-        geomInst.vertexBuffer[tri.index2]
-    };
-
     // Uniform sampling on unit triangle
     // A Low-Distortion Map Between Triangle and Square
     float t0 = 0.5f * u0;
@@ -445,6 +434,17 @@ CUDA_DEVICE_FUNCTION float3 sampleLight(float ul, float u0, float u1,
 
     lightSample->b1 = t1;
     lightSample->b2 = t2;
+
+    //printf("%u-%u-%u: %g\n", instIndex, geomInstIndex, primIndex, lightProb);
+
+    const MaterialData &mat = plp.s->materialDataBuffer[geomInst.materialSlot];
+
+    const Shared::Triangle &tri = geomInst.triangleBuffer[primIndex];
+    const Shared::Vertex (&v)[3] = {
+        geomInst.vertexBuffer[tri.index0],
+        geomInst.vertexBuffer[tri.index1],
+        geomInst.vertexBuffer[tri.index2]
+    };
 
     *lightPosition = t0 * v[0].position + t1 * v[1].position + t2 * v[2].position;
     *lightPosition = inst.transform * *lightPosition;
@@ -484,7 +484,6 @@ CUDA_DEVICE_FUNCTION float3 evaluateLight(const LightSample &lightSample, float3
         geomInst.vertexBuffer[tri.index2]
     };
 
-
     float t1 = lightSample.b1;
     float t2 = lightSample.b2;
     float t0 = 1.0f - (t1 + t2);
@@ -514,7 +513,7 @@ CUDA_DEVICE_FUNCTION float3 sampleUnshadowedContribution(
     float3 M = sampleLight(uLight, uPos0, uPos1,
                            lightSample, &lp, &lpn, probDensity);
 
-    float3 offsetOrigin = shadingPoint/* + shadingFrame.normal * epsilon*/;
+    float3 offsetOrigin = shadingPoint + shadingFrame.normal * RayEpsilon;
     float3 shadowRayDir = lp - offsetOrigin;
     float dist2 = sqLength(shadowRayDir);
     float dist = std::sqrt(dist2);
@@ -523,24 +522,28 @@ CUDA_DEVICE_FUNCTION float3 sampleUnshadowedContribution(
 
     float lpCos = dot(-shadowRayDir, lpn);
     float spCos = shadowRayDirLocal.z;
-    float G = lpCos * spCos / dist2;
 
-    float3 Le = lpCos > 0 ? M / Pi : make_float3(0.0f, 0.0f, 0.0f);
-    float3 fsValue = bsdf.evaluate(vOutLocal, shadowRayDirLocal);
-
-    float3 contribution = fsValue * Le * G;
-
-    return contribution;
+    if (lpCos > 0) {
+        float3 Le = M / Pi;
+        float3 fsValue = bsdf.evaluate(vOutLocal, shadowRayDirLocal);
+        float G = lpCos * spCos / dist2;
+        float3 ret = fsValue * Le * G;
+        return ret;
+    }
+    else {
+        return make_float3(0.0f, 0.0f, 0.0f);
+    }
 }
 
-CUDA_DEVICE_FUNCTION float3 evaluateUnshadowedContribution(
+template <bool withVisibility>
+CUDA_DEVICE_FUNCTION float3 performDirectLighting(
     const float3 &shadingPoint, const float3 &vOutLocal, const ReferenceFrame &shadingFrame, const BSDF &bsdf,
     const LightSample &lightSample) {
     float3 lp;
     float3 lpn;
     float3 M = evaluateLight(lightSample, &lp, &lpn);
 
-    float3 offsetOrigin = shadingPoint/* + shadingFrame.normal * epsilon*/;
+    float3 offsetOrigin = shadingPoint + shadingFrame.normal * RayEpsilon;
     float3 shadowRayDir = lp - offsetOrigin;
     float dist2 = sqLength(shadowRayDir);
     float dist = std::sqrt(dist2);
@@ -549,14 +552,27 @@ CUDA_DEVICE_FUNCTION float3 evaluateUnshadowedContribution(
 
     float lpCos = dot(-shadowRayDir, lpn);
     float spCos = shadowRayDirLocal.z;
-    float G = lpCos * spCos / dist2;
 
-    float3 Le = lpCos > 0 ? M / Pi : make_float3(0.0f, 0.0f, 0.0f);
-    float3 fsValue = bsdf.evaluate(vOutLocal, shadowRayDirLocal);
+    float visibility = 1.0f;
+    if constexpr (withVisibility) {
+        optixu::trace<VisibilityRayPayloadSignature>(
+            plp.f->travHandle,
+            offsetOrigin, shadowRayDir, 0.0f, dist * 0.9999f, 0.0f,
+            0xFF, OPTIX_RAY_FLAG_NONE,
+            RayType_Visibility, NumRayTypes, RayType_Visibility,
+            visibility);
+    }
 
-    float3 contribution = fsValue * Le * G;
-
-    return contribution;
+    if (visibility > 0 && lpCos > 0) {
+        float3 Le = M / Pi;
+        float3 fsValue = bsdf.evaluate(vOutLocal, shadowRayDirLocal);
+        float G = lpCos * spCos / dist2;
+        float3 ret = fsValue * Le * G;
+        return ret;
+    }
+    else {
+        return make_float3(0.0f, 0.0f, 0.0f);
+    }
 }
 
 CUDA_DEVICE_FUNCTION bool evaluateVisibility(
@@ -658,7 +674,7 @@ CUDA_DEVICE_KERNEL void RT_CH_NAME(primary)() {
     Reservoir<LightSample> reservoir = plp.s->reservoirBuffer[curResIndex][launchIndex];
 
     reservoir.initialize();
-    float cachedTargetDensity = 0.0f;
+    float selectedTargetDensity = 0.0f;
     uint32_t numCandidates = 1 << plp.f->log2NumCandidateSamples;
     for (int i = 0; i < numCandidates; ++i) {
         LightSample lightSample;
@@ -671,17 +687,21 @@ CUDA_DEVICE_KERNEL void RT_CH_NAME(primary)() {
         float weight = targetDensity / probDensity;
 
         if (reservoir.update(lightSample, weight, rng.getFloat0cTo1o()))
-            cachedTargetDensity = targetDensity;
+            selectedTargetDensity = targetDensity;
     }
 
     ReservoirInfo reservoirInfo;
-    reservoirInfo.recPDFEstimate = reservoir.getSumWeights() / (cachedTargetDensity * reservoir.getStreamLength());
-    if (!isfinite(reservoirInfo.recPDFEstimate))
-        reservoirInfo.recPDFEstimate = 0;
-    reservoirInfo.targetDensity = cachedTargetDensity;
-
-    if (!evaluateVisibility(p, shadingFrame, reservoir.getSample()) && plp.f->reuseVisibility)
+    reservoirInfo.recPDFEstimate = reservoir.getSumWeights() / (selectedTargetDensity * reservoir.getStreamLength());
+    reservoirInfo.targetDensity = selectedTargetDensity;
+    if (!isfinite(reservoirInfo.recPDFEstimate)) {
         reservoirInfo.recPDFEstimate = 0.0f;
+        reservoirInfo.targetDensity = 0.0f;
+    }
+
+    if (!evaluateVisibility(p, shadingFrame, reservoir.getSample()) && plp.f->reuseVisibility) {
+        reservoirInfo.recPDFEstimate = 0.0f;
+        reservoirInfo.targetDensity = 0.0f;
+    }
 
     //uint32_t linearIndex = launchIndex.y * plp.imageSize.x + launchIndex.x;
     plp.s->rngBuffer.write(launchIndex, rng);
@@ -718,7 +738,10 @@ CUDA_DEVICE_FUNCTION bool testNeighbor(
 
 
 
-CUDA_DEVICE_KERNEL void RT_RG_NAME(combineTemporalNeighbors)() {
+static constexpr bool useMIS_RIS = true;
+
+template <bool useUnbiasedEstimator>
+CUDA_DEVICE_FUNCTION void combineTemporalNeighbors() {
     int2 launchIndex = make_int2(optixGetLaunchIndex().x, optixGetLaunchIndex().y);
 
     PCG32RNG rng = plp.s->rngBuffer.read(launchIndex);
@@ -749,43 +772,109 @@ CUDA_DEVICE_KERNEL void RT_RG_NAME(combineTemporalNeighbors)() {
         uint32_t curResIndex = plp.currentReservoirIndex;
         uint32_t prevResIndex = (curResIndex + 1) % 2;
 
-        float cachedTargetDensity = 0.0f;
+        float selectedTargetDensity = 0.0f;
+        bool neighborIsSelected = false;
         Reservoir<LightSample> combinedReservoir;
         combinedReservoir.initialize();
 
-        Reservoir<LightSample> self = plp.s->reservoirBuffer[curResIndex][launchIndex];
-        ReservoirInfo selfResInfo = plp.s->reservoirInfoBuffer[curResIndex].read(launchIndex);
+        const Reservoir<LightSample> /*&*/self = plp.s->reservoirBuffer[curResIndex][launchIndex];
+        const ReservoirInfo selfResInfo = plp.s->reservoirInfoBuffer[curResIndex].read(launchIndex);
         if (selfResInfo.recPDFEstimate > 0.0f) {
             combinedReservoir = self;
-            cachedTargetDensity = selfResInfo.targetDensity;
+            selectedTargetDensity = selfResInfo.targetDensity;
         }
         uint32_t combinedStreamLength = self.getStreamLength();
         uint32_t maxNumPrevSamples = 20 * self.getStreamLength();
 
-        int2 neighborIndex = make_int2(launchIndex.x + 0.5f - motionVector.x,
-                                       launchIndex.y + 0.5f - motionVector.y);
-        if (testNeighbor(prevBufIdx, neighborIndex, dist, normalInWorld)) {
-            const Reservoir<LightSample> &neighbor = plp.s->reservoirBuffer[prevResIndex][neighborIndex];
-            const ReservoirInfo &neighborInfo = plp.s->reservoirInfoBuffer[prevBufIdx].read(neighborIndex);
+        int2 nbCoord = make_int2(launchIndex.x + 0.5f - motionVector.x,
+                                 launchIndex.y + 0.5f - motionVector.y);
+        bool acceptedNeighbor = testNeighbor(prevBufIdx, nbCoord, dist, normalInWorld);
+        if (acceptedNeighbor) {
+            const Reservoir<LightSample> /*&*/neighbor = plp.s->reservoirBuffer[prevResIndex][nbCoord];
+            const ReservoirInfo neighborInfo = plp.s->reservoirInfoBuffer[prevResIndex].read(nbCoord);
 
-            LightSample lightSample = neighbor.getSample();
-            float3 cont = evaluateUnshadowedContribution(positionInWorld, vOutLocal, shadingFrame, bsdf, lightSample);
+            LightSample nbLightSample = neighbor.getSample();
+            float3 cont = performDirectLighting<false>(
+                positionInWorld, vOutLocal, shadingFrame, bsdf, nbLightSample);
             float targetDensity = convertToWeight(cont); // unnormalized
-            uint32_t streamLength = min(neighbor.getStreamLength(), maxNumPrevSamples);
-            float weight = targetDensity * neighborInfo.recPDFEstimate * streamLength;
-            if (combinedReservoir.update(lightSample, weight, rng.getFloat0cTo1o()))
-                cachedTargetDensity = targetDensity;
+            uint32_t nbStreamLength = min(neighbor.getStreamLength(), maxNumPrevSamples);
+            float weight = targetDensity * neighborInfo.recPDFEstimate * nbStreamLength;
+            if (combinedReservoir.update(nbLightSample, weight, rng.getFloat0cTo1o())) {
+                selectedTargetDensity = targetDensity;
+                if constexpr (useUnbiasedEstimator)
+                    neighborIsSelected = true;
+                else
+                    (void)neighborIsSelected;
+            }
 
-            combinedStreamLength += streamLength;
+            combinedStreamLength += nbStreamLength;
         }
         combinedReservoir.setStreamLength(combinedStreamLength);
 
+        float weightForEstimate;
+        if constexpr (useUnbiasedEstimator) {
+            LightSample selectedLightSample = combinedReservoir.getSample();
+
+            float numWeight;
+            float denomWeight;
+            if constexpr (useMIS_RIS) {
+                numWeight = selectedTargetDensity;
+                denomWeight = numWeight * self.getStreamLength();
+            }
+            else {
+                numWeight = 1.0f;
+                denomWeight = 0.0f;
+                if (selectedTargetDensity > 0.0f)
+                    denomWeight = self.getStreamLength();
+            }
+            if (acceptedNeighbor) {
+                GBuffer0 nbGBuffer0 = plp.s->GBuffer0[prevBufIdx].read(nbCoord);
+                GBuffer1 nbGBuffer1 = plp.s->GBuffer1[prevBufIdx].read(nbCoord);
+                GBuffer2 nbGBuffer2 = plp.s->GBuffer2[prevBufIdx].read(nbCoord);
+
+                float3 nbPositionInWorld = nbGBuffer0.positionInWorld;
+                float3 nbNormalInWorld = nbGBuffer1.normalInWorld;
+                float2 nbTexCoord = make_float2(nbGBuffer0.texCoord_x, nbGBuffer1.texCoord_y);
+                uint32_t nbMaterialSlot = nbGBuffer2.materialSlot;
+
+                const MaterialData &nbMat = plp.s->materialDataBuffer[nbMaterialSlot];
+
+                BSDF nbBsdf;
+                nbMat.setupBSDF(nbMat, nbTexCoord, &nbBsdf);
+                ReferenceFrame nbShadingFrame(nbNormalInWorld);
+                float3 nbVOut = plp.f->camera.position - nbPositionInWorld;
+                float nbDist = length(nbVOut);
+                nbVOut /= nbDist;
+                float3 nbVOutLocal = nbShadingFrame.toLocal(nbVOut);
+
+                const Reservoir<LightSample> /*&*/neighbor = plp.s->reservoirBuffer[prevResIndex][nbCoord];
+
+                float3 cont = performDirectLighting<false>(
+                    nbPositionInWorld, nbVOutLocal, nbShadingFrame, nbBsdf, selectedLightSample);
+                float nbTargetDensity = convertToWeight(cont); // unnormalized
+                uint32_t nbStreamLength = min(neighbor.getStreamLength(), maxNumPrevSamples);
+                if constexpr (useMIS_RIS) {
+                    denomWeight += nbTargetDensity * nbStreamLength;
+                    if (neighborIsSelected)
+                        numWeight = nbTargetDensity;
+                }
+                else {
+                    if (nbTargetDensity > 0.0f)
+                        denomWeight += nbStreamLength;
+                }
+            }
+            weightForEstimate = numWeight / denomWeight;
+        }
+        else {
+            weightForEstimate = 1.0f / combinedReservoir.getStreamLength();
+        }
         ReservoirInfo reservoirInfo;
-        reservoirInfo.recPDFEstimate = combinedReservoir.getSumWeights() /
-            (cachedTargetDensity * combinedReservoir.getStreamLength());
-        if (!isfinite(reservoirInfo.recPDFEstimate))
-            reservoirInfo.recPDFEstimate = 0;
-        reservoirInfo.targetDensity = cachedTargetDensity;
+        reservoirInfo.recPDFEstimate = weightForEstimate * combinedReservoir.getSumWeights() / selectedTargetDensity;
+        reservoirInfo.targetDensity = selectedTargetDensity;
+        if (!isfinite(reservoirInfo.recPDFEstimate)) {
+            reservoirInfo.recPDFEstimate = 0.0f;
+            reservoirInfo.targetDensity = 0.0f;
+        }
 
         plp.s->reservoirBuffer[curResIndex][launchIndex] = combinedReservoir;
         plp.s->reservoirInfoBuffer[curResIndex].write(launchIndex, reservoirInfo);
@@ -794,9 +883,18 @@ CUDA_DEVICE_KERNEL void RT_RG_NAME(combineTemporalNeighbors)() {
     }
 }
 
+CUDA_DEVICE_KERNEL void RT_RG_NAME(combineTemporalNeighborsBiased)() {
+    combineTemporalNeighbors<false>();
+}
+
+CUDA_DEVICE_KERNEL void RT_RG_NAME(combineTemporalNeighborsUnbiased)() {
+    combineTemporalNeighbors<true>();
+}
 
 
-CUDA_DEVICE_KERNEL void RT_RG_NAME(combineSpatialNeighbors)() {
+
+template <bool useUnbiasedEstimator>
+CUDA_DEVICE_FUNCTION void combineSpatialNeighbors() {
     int2 launchIndex = make_int2(optixGetLaunchIndex().x, optixGetLaunchIndex().y);
 
     PCG32RNG rng = plp.s->rngBuffer.read(launchIndex);
@@ -825,15 +923,16 @@ CUDA_DEVICE_KERNEL void RT_RG_NAME(combineSpatialNeighbors)() {
         uint32_t srcResIndex = plp.currentReservoirIndex;
         uint32_t dstResIndex = (srcResIndex + 1) % 2;
 
-        float cachedTargetDensity = 0.0f;
+        float selectedTargetDensity = 0.0f;
+        int32_t selectedNeighborIndex = -1;
         Reservoir<LightSample> combinedReservoir;
         combinedReservoir.initialize();
 
-        Reservoir<LightSample> self = plp.s->reservoirBuffer[srcResIndex][launchIndex];
-        ReservoirInfo selfResInfo = plp.s->reservoirInfoBuffer[srcResIndex].read(launchIndex);
+        const Reservoir<LightSample> /*&*/self = plp.s->reservoirBuffer[srcResIndex][launchIndex];
+        const ReservoirInfo selfResInfo = plp.s->reservoirInfoBuffer[srcResIndex].read(launchIndex);
         if (selfResInfo.recPDFEstimate > 0.0f) {
             combinedReservoir = self;
-            cachedTargetDensity = selfResInfo.targetDensity;
+            selectedTargetDensity = selfResInfo.targetDensity;
         }
         uint32_t combinedStreamLength = self.getStreamLength();
 
@@ -851,32 +950,129 @@ CUDA_DEVICE_KERNEL void RT_RG_NAME(combineSpatialNeighbors)() {
                 deltaX = radius * std::cos(angle);
                 deltaY = radius * std::sin(angle);
             }
-            int2 neighborIndex = make_int2(launchIndex.x + 0.5f + deltaX,
-                                           launchIndex.y + 0.5f + deltaY);
-            if (testNeighbor(bufIdx, neighborIndex, dist, normalInWorld) &&
-                (neighborIndex.x != launchIndex.x || neighborIndex.y != launchIndex.y)) {
-                Reservoir<LightSample> neighbor = plp.s->reservoirBuffer[srcResIndex][neighborIndex];
-                const ReservoirInfo &neighborInfo = plp.s->reservoirInfoBuffer[srcResIndex].read(neighborIndex);
+            int2 nbCoord = make_int2(launchIndex.x + 0.5f + deltaX,
+                                     launchIndex.y + 0.5f + deltaY);
+            if (testNeighbor(bufIdx, nbCoord, dist, normalInWorld) &&
+                (nbCoord.x != launchIndex.x || nbCoord.y != launchIndex.y)) {
+                const Reservoir<LightSample> /*&*/neighbor = plp.s->reservoirBuffer[srcResIndex][nbCoord];
+                const ReservoirInfo neighborInfo = plp.s->reservoirInfoBuffer[srcResIndex].read(nbCoord);
 
-                LightSample lightSample = neighbor.getSample();
-                float3 cont = evaluateUnshadowedContribution(positionInWorld, vOutLocal, shadingFrame, bsdf, lightSample);
+                LightSample nbLightSample = neighbor.getSample();
+                float3 cont;
+                if constexpr (useUnbiasedEstimator) {
+                    if (plp.f->reuseVisibility) // ?
+                        cont = performDirectLighting<true>(
+                            positionInWorld, vOutLocal, shadingFrame, bsdf, nbLightSample);
+                    else
+                        cont = performDirectLighting<false>(
+                            positionInWorld, vOutLocal, shadingFrame, bsdf, nbLightSample);
+                }
+                else {
+                    cont = performDirectLighting<false>(positionInWorld, vOutLocal, shadingFrame, bsdf, nbLightSample);
+                }
                 float targetDensity = convertToWeight(cont); // unnormalized
-                uint32_t streamLength = neighbor.getStreamLength();
-                float weight = targetDensity * neighborInfo.recPDFEstimate * streamLength;
-                if (combinedReservoir.update(lightSample, weight, rng.getFloat0cTo1o()))
-                    cachedTargetDensity = targetDensity;
+                uint32_t nbStreamLength = neighbor.getStreamLength();
+                float weight = targetDensity * neighborInfo.recPDFEstimate * nbStreamLength;
+                if (combinedReservoir.update(nbLightSample, weight, rng.getFloat0cTo1o())) {
+                    selectedTargetDensity = targetDensity;
+                    if constexpr (useUnbiasedEstimator)
+                        selectedNeighborIndex = nIdx;
+                    else
+                        (void)selectedNeighborIndex;
+                }
 
-                combinedStreamLength += streamLength;
+                combinedStreamLength += nbStreamLength;
             }
         }
         combinedReservoir.setStreamLength(combinedStreamLength);
 
+        float weightForEstimate;
+        if constexpr (useUnbiasedEstimator) {
+            LightSample selectedLightSample = combinedReservoir.getSample();
+
+            float numWeight;
+            float denomWeight;
+            if constexpr (useMIS_RIS) {
+                numWeight = selectedTargetDensity;
+                denomWeight = numWeight * self.getStreamLength();
+            }
+            else {
+                numWeight = 1.0f;
+                denomWeight = 0.0f;
+                if (selectedTargetDensity > 0.0f)
+                    denomWeight = self.getStreamLength();
+            }
+            for (int nIdx = 0; nIdx < plp.f->numSpatialNeighbors; ++nIdx) {
+                float radius = plp.f->spatialNeighborRadius;
+                float deltaX, deltaY;
+                if (plp.f->useLowDiscrepancyNeighbors) {
+                    float2 delta = plp.s->spatialNeighborDeltas[(plp.spatialNeighborBaseIndex + nIdx) % 1024];
+                    deltaX = radius * delta.x;
+                    deltaY = radius * delta.y;
+                }
+                else {
+                    radius *= std::sqrt(rng.getFloat0cTo1o());
+                    float angle = 2 * Pi * rng.getFloat0cTo1o();
+                    deltaX = radius * std::cos(angle);
+                    deltaY = radius * std::sin(angle);
+                }
+                int2 nbCoord = make_int2(launchIndex.x + 0.5f + deltaX,
+                                         launchIndex.y + 0.5f + deltaY);;
+                if (testNeighbor(bufIdx, nbCoord, dist, normalInWorld) &&
+                    (nbCoord.x != launchIndex.x || nbCoord.y != launchIndex.y)) {
+                    GBuffer0 nbGBuffer0 = plp.s->GBuffer0[bufIdx].read(nbCoord);
+                    GBuffer1 nbGBuffer1 = plp.s->GBuffer1[bufIdx].read(nbCoord);
+                    GBuffer2 nbGBuffer2 = plp.s->GBuffer2[bufIdx].read(nbCoord);
+
+                    float3 nbPositionInWorld = nbGBuffer0.positionInWorld;
+                    float3 nbNormalInWorld = nbGBuffer1.normalInWorld;
+                    float2 nbTexCoord = make_float2(nbGBuffer0.texCoord_x, nbGBuffer1.texCoord_y);
+                    uint32_t nbMaterialSlot = nbGBuffer2.materialSlot;
+
+                    const MaterialData &nbMat = plp.s->materialDataBuffer[nbMaterialSlot];
+
+                    BSDF nbBsdf;
+                    nbMat.setupBSDF(nbMat, nbTexCoord, &nbBsdf);
+                    ReferenceFrame nbShadingFrame(nbNormalInWorld);
+                    float3 nbVOut = plp.f->camera.position - nbPositionInWorld;
+                    float nbDist = length(nbVOut);
+                    nbVOut /= nbDist;
+                    float3 nbVOutLocal = nbShadingFrame.toLocal(nbVOut);
+
+                    const Reservoir<LightSample> /*&*/neighbor = plp.s->reservoirBuffer[srcResIndex][nbCoord];
+
+                    float3 cont;
+                    if (plp.f->reuseVisibility) // ?
+                        cont = performDirectLighting<true>(
+                            nbPositionInWorld, nbVOutLocal, nbShadingFrame, nbBsdf, selectedLightSample);
+                    else
+                        cont = performDirectLighting<false>(
+                            nbPositionInWorld, nbVOutLocal, nbShadingFrame, nbBsdf, selectedLightSample);
+                    float nbTargetDensity = convertToWeight(cont); // unnormalized
+                    uint32_t nbStreamLength = neighbor.getStreamLength();
+                    if constexpr (useMIS_RIS) {
+                        denomWeight += nbTargetDensity * nbStreamLength;
+                        if (nIdx == selectedNeighborIndex)
+                            numWeight = nbTargetDensity;
+                    }
+                    else {
+                        if (nbTargetDensity > 0.0f)
+                            denomWeight += nbStreamLength;
+                    }
+                }
+            }
+            weightForEstimate = numWeight / denomWeight;
+        }
+        else {
+            weightForEstimate = 1.0f / combinedReservoir.getStreamLength();
+        }
         ReservoirInfo reservoirInfo;
-        reservoirInfo.recPDFEstimate = combinedReservoir.getSumWeights() /
-            (cachedTargetDensity * combinedReservoir.getStreamLength());
-        if (!isfinite(reservoirInfo.recPDFEstimate))
-            reservoirInfo.recPDFEstimate = 0;
-        reservoirInfo.targetDensity = cachedTargetDensity;
+        reservoirInfo.recPDFEstimate = weightForEstimate * combinedReservoir.getSumWeights() / selectedTargetDensity;
+        reservoirInfo.targetDensity = selectedTargetDensity;
+        if (!isfinite(reservoirInfo.recPDFEstimate)) {
+            reservoirInfo.recPDFEstimate = 0.0f;
+            reservoirInfo.targetDensity = 0.0f;
+        }
 
         plp.s->reservoirBuffer[dstResIndex][launchIndex] = combinedReservoir;
         plp.s->reservoirInfoBuffer[dstResIndex].write(launchIndex, reservoirInfo);
@@ -885,44 +1081,15 @@ CUDA_DEVICE_KERNEL void RT_RG_NAME(combineSpatialNeighbors)() {
     }
 }
 
-
-
-CUDA_DEVICE_FUNCTION float3 performDirectLighting(
-    const float3 &shadingPoint, const float3 &vOutLocal, const ReferenceFrame &shadingFrame, const BSDF &bsdf,
-    const LightSample &lightSample) {
-    float3 lp;
-    float3 lpn;
-    float3 M = evaluateLight(lightSample, &lp, &lpn);
-
-    float3 offsetOrigin = shadingPoint + shadingFrame.normal * RayEpsilon;
-    float3 shadowRayDir = lp - offsetOrigin;
-    float dist2 = sqLength(shadowRayDir);
-    float dist = std::sqrt(dist2);
-    shadowRayDir /= dist;
-    float3 shadowRayDirLocal = shadingFrame.toLocal(shadowRayDir);
-
-    float lpCos = dot(-shadowRayDir, lpn);
-    float spCos = shadowRayDirLocal.z;
-
-    float visibility = 1.0f;
-    optixu::trace<VisibilityRayPayloadSignature>(
-        plp.f->travHandle,
-        offsetOrigin, shadowRayDir, 0.0f, dist * 0.9999f, 0.0f,
-        0xFF, OPTIX_RAY_FLAG_NONE,
-        RayType_Visibility, NumRayTypes, RayType_Visibility,
-        visibility);
-
-    if (visibility > 0 && lpCos > 0) {
-        float3 Le = M / Pi;
-        float3 fsValue = bsdf.evaluate(vOutLocal, shadowRayDirLocal);
-        float G = lpCos * spCos / dist2;
-        float3 ret = fsValue * Le * G;
-        return ret;
-    }
-    else {
-        return make_float3(0.0f, 0.0f, 0.0f);
-    }
+CUDA_DEVICE_KERNEL void RT_RG_NAME(combineSpatialNeighborsBiased)() {
+    combineSpatialNeighbors<false>();
 }
+
+CUDA_DEVICE_KERNEL void RT_RG_NAME(combineSpatialNeighborsUnbiased)() {
+    combineSpatialNeighbors<true>();
+}
+
+
 
 CUDA_DEVICE_KERNEL void RT_RG_NAME(shading)() {
     uint2 launchIndex = make_uint2(optixGetLaunchIndex().x, optixGetLaunchIndex().y);
@@ -951,8 +1118,8 @@ CUDA_DEVICE_KERNEL void RT_RG_NAME(shading)() {
         float3 vOutLocal = shadingFrame.toLocal(vOut);
 
         uint32_t curResIndex = plp.currentReservoirIndex;
-        const Reservoir<LightSample> &reservoir = plp.s->reservoirBuffer[curResIndex][launchIndex];
-        const ReservoirInfo &reservoirInfo = plp.s->reservoirInfoBuffer[curResIndex].read(launchIndex);
+        const Reservoir<LightSample> /*&*/reservoir = plp.s->reservoirBuffer[curResIndex][launchIndex];
+        const ReservoirInfo reservoirInfo = plp.s->reservoirInfoBuffer[curResIndex].read(launchIndex);
 
         contribution = make_float3(0.0f);
         if (vOutLocal.z > 0) {
@@ -964,12 +1131,11 @@ CUDA_DEVICE_KERNEL void RT_RG_NAME(shading)() {
             contribution += emittance / Pi;
         }
 
-        uint32_t numCandidateSamples = 1 << plp.f->log2NumCandidateSamples;
         const LightSample &lightSample = reservoir.getSample();
         float3 directCont = make_float3(0.0f);
         float recPDFEstimate = reservoirInfo.recPDFEstimate;
         if (recPDFEstimate > 0 && isfinite(recPDFEstimate))
-            directCont = recPDFEstimate * performDirectLighting(positionInWorld, vOutLocal, shadingFrame, bsdf, lightSample);
+            directCont = recPDFEstimate * performDirectLighting<true>(positionInWorld, vOutLocal, shadingFrame, bsdf, lightSample);
 
         contribution += directCont;
 

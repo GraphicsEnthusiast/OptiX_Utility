@@ -340,13 +340,21 @@ namespace Shared {
         int2 mousePosition;
         PickInfo* pickInfo;
 
-        unsigned int useUnbiasedEstimator : 1;
         unsigned int log2NumCandidateSamples : 4;
         unsigned int numSpatialNeighbors : 4;
         unsigned int useLowDiscrepancyNeighbors : 1;
         unsigned int reuseVisibility : 1;
         unsigned int bufferIndex : 1;
         unsigned int resetFlowBuffer : 1;
+
+        uint32_t debugSwitches;
+        void setDebugSwitch(int32_t idx, bool b) {
+            debugSwitches &= ~(1 << idx);
+            debugSwitches |= b << idx;
+        }
+        CUDA_DEVICE_FUNCTION bool getDebugSwitch(int32_t idx) const {
+            return (debugSwitches >> idx) & 0b1;
+        }
     };
     
     struct PipelineLaunchParameters {
