@@ -526,7 +526,7 @@ CUDA_DEVICE_FUNCTION float3 sampleUnshadowedContribution(
     if (lpCos > 0) {
         float3 Le = M / Pi;
         float3 fsValue = bsdf.evaluate(vOutLocal, shadowRayDirLocal);
-        float G = lpCos * spCos / dist2;
+        float G = lpCos * std::fabs(spCos) / dist2;
         float3 ret = fsValue * Le * G;
         return ret;
     }
@@ -566,7 +566,7 @@ CUDA_DEVICE_FUNCTION float3 performDirectLighting(
     if (visibility > 0 && lpCos > 0) {
         float3 Le = M / Pi;
         float3 fsValue = bsdf.evaluate(vOutLocal, shadowRayDirLocal);
-        float G = lpCos * spCos / dist2;
+        float G = lpCos * std::fabs(spCos) / dist2;
         float3 ret = fsValue * Le * G;
         return ret;
     }
@@ -1041,8 +1041,11 @@ CUDA_DEVICE_FUNCTION void combineSpatialNeighbors() {
 
                     const Reservoir<LightSample> /*&*/neighbor = plp.s->reservoirBuffer[srcResIndex][nbCoord];
 
+                    // ここは所詮MISウェイトなのでVisibilityいらないかも。
+                    // その場合、現在のピクセルについてVisibilityを含まないPDFを評価する必要がある。
+                    // 要確認。
                     float3 cont;
-                    if (plp.f->reuseVisibility) // ?
+                    if (plp.f->reuseVisibility)
                         cont = performDirectLighting<true>(
                             nbPositionInWorld, nbVOutLocal, nbShadingFrame, nbBsdf, selectedLightSample);
                     else
