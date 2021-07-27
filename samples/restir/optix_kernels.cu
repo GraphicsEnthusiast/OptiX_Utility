@@ -815,16 +815,23 @@ CUDA_DEVICE_FUNCTION void combineTemporalNeighbors() {
         if constexpr (useUnbiasedEstimator) {
             LightSample selectedLightSample = combinedReservoir.getSample();
 
+            float targetDensityForSelf = selectedTargetDensity;
+            if (neighborIsSelected) {
+                float3 cont = performDirectLighting<false>(
+                    positionInWorld, vOutLocal, shadingFrame, bsdf, selectedLightSample);
+                targetDensityForSelf = convertToWeight(cont); // unnormalized
+            }
+
             float numWeight;
             float denomWeight;
             if constexpr (useMIS_RIS) {
-                numWeight = selectedTargetDensity;
-                denomWeight = numWeight * self.getStreamLength();
+                numWeight = targetDensityForSelf;
+                denomWeight = targetDensityForSelf * self.getStreamLength();
             }
             else {
                 numWeight = 1.0f;
                 denomWeight = 0.0f;
-                if (selectedTargetDensity > 0.0f)
+                if (targetDensityForSelf > 0.0f)
                     denomWeight = self.getStreamLength();
             }
             if (acceptedNeighbor) {
@@ -990,16 +997,23 @@ CUDA_DEVICE_FUNCTION void combineSpatialNeighbors() {
         if constexpr (useUnbiasedEstimator) {
             LightSample selectedLightSample = combinedReservoir.getSample();
 
+            float targetDensityForSelf = selectedTargetDensity;
+            if (selectedNeighborIndex >= 0) {
+                float3 cont = performDirectLighting<false>(
+                    positionInWorld, vOutLocal, shadingFrame, bsdf, selectedLightSample);
+                targetDensityForSelf = convertToWeight(cont); // unnormalized
+            }
+
             float numWeight;
             float denomWeight;
             if constexpr (useMIS_RIS) {
-                numWeight = selectedTargetDensity;
-                denomWeight = numWeight * self.getStreamLength();
+                numWeight = targetDensityForSelf;
+                denomWeight = targetDensityForSelf * self.getStreamLength();
             }
             else {
                 numWeight = 1.0f;
                 denomWeight = 0.0f;
-                if (selectedTargetDensity > 0.0f)
+                if (targetDensityForSelf > 0.0f)
                     denomWeight = self.getStreamLength();
             }
             for (int nIdx = 0; nIdx < plp.f->numSpatialNeighbors; ++nIdx) {
