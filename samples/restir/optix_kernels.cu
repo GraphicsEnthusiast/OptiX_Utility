@@ -328,10 +328,8 @@ CUDA_DEVICE_KERNEL void RT_AH_NAME(visibility)() {
 
 
 
-CUDA_DEVICE_KERNEL void RT_RG_NAME(primary)() {
+CUDA_DEVICE_KERNEL void RT_RG_NAME(setupGBuffers)() {
     uint2 launchIndex = make_uint2(optixGetLaunchIndex().x, optixGetLaunchIndex().y);
-
-    PCG32RNG rng = plp.s->rngBuffer.read(launchIndex);
 
     const PerspectiveCamera &camera = plp.f->camera;
     float x = (launchIndex.x + 0.5f) / plp.s->imageSize.x;
@@ -366,7 +364,7 @@ CUDA_DEVICE_KERNEL void RT_RG_NAME(primary)() {
         plp.f->travHandle, origin, direction,
         0.0f, FLT_MAX, 0.0f, 0xFF, OPTIX_RAY_FLAG_NONE,
         RayType_Primary, NumRayTypes, RayType_Primary,
-        rng, hitPointParamsPtr, pickInfoPtr);
+        hitPointParamsPtr, pickInfoPtr);
 
 
 
@@ -586,10 +584,6 @@ CUDA_DEVICE_FUNCTION bool evaluateVisibility(
     float dist2 = sqLength(shadowRayDir);
     float dist = std::sqrt(dist2);
     shadowRayDir /= dist;
-    //float3 shadowRayDirLocal = shadingFrame.toLocal(shadowRayDir);
-
-    //float lpCos = dot(-shadowRayDir, lpn);
-    //float spCos = shadowRayDirLocal.z;
 
     float visibility = 1.0f;
     optixu::trace<VisibilityRayPayloadSignature>(
@@ -602,17 +596,16 @@ CUDA_DEVICE_FUNCTION bool evaluateVisibility(
     return visibility > 0.0f;
 }
 
-CUDA_DEVICE_KERNEL void RT_CH_NAME(primary)() {
+CUDA_DEVICE_KERNEL void RT_CH_NAME(setupGBuffers)() {
     uint2 launchIndex = make_uint2(optixGetLaunchIndex().x, optixGetLaunchIndex().y);
 
     auto sbtr = HitGroupSBTRecordData::get();
     const InstanceData &inst = plp.f->instanceDataBuffer[optixGetInstanceId()];
     const GeometryInstanceData &geomInst = sbtr.geomInstData;
 
-    PCG32RNG rng;
     HitPointParams* hitPointParams;
     PickInfo* pickInfo;
-    optixu::getPayloads<PrimaryRayPayloadSignature>(&rng, &hitPointParams, &pickInfo);
+    optixu::getPayloads<PrimaryRayPayloadSignature>(&hitPointParams, &pickInfo);
 
     auto hp = HitPointParameter::get();
     float3 p;
@@ -636,6 +629,8 @@ CUDA_DEVICE_KERNEL void RT_CH_NAME(primary)() {
         p = optixTransformPointFromObjectToWorldSpace(localP);
         prevP = inst.prevTransform * localP;
         sn = normalize(optixTransformNormalFromObjectToWorldSpace(sn));
+        if (!allFinite(sn))
+            sn = make_float3(0, 0, 1);
     }
 
     hitPointParams->positionInWorld = p;
@@ -643,77 +638,79 @@ CUDA_DEVICE_KERNEL void RT_CH_NAME(primary)() {
     hitPointParams->normalInWorld = sn;
     hitPointParams->texCoord = texCoord;
     hitPointParams->materialSlot = geomInst.materialSlot;
-
-    float3 vOut = -optixGetWorldRayDirection();
-
-    const MaterialData &mat = plp.s->materialDataBuffer[geomInst.materialSlot];
-    BSDF bsdf;
-    mat.setupBSDF(mat, texCoord, &bsdf);
-    ReferenceFrame shadingFrame(sn);
-    float3 vOutLocal = shadingFrame.toLocal(normalize(vOut));
-
-    if (launchIndex.x == plp.f->mousePosition.x &&
-        launchIndex.y == plp.f->mousePosition.y) {
-        pickInfo->hit = true;
-        pickInfo->instSlot = optixGetInstanceId();
-        pickInfo->geomInstSlot = geomInst.geomInstSlot;
-        pickInfo->matSlot = geomInst.materialSlot;
-        pickInfo->primIndex = hp.primIndex;
-        pickInfo->positionInWorld = p;
-        pickInfo->albedo = bsdf.getBaseColor(vOutLocal);
-        float3 emittance = mat.emittanceScale;
-        //if (mat.emittance) {
-        //    float4 texValue = tex2DLod<float4>(mat.emittance, texCoord.x, texCoord.y, 0.0f);
-        //    emittance *= make_float3(texValue);
-        //}
-        pickInfo->emittance = emittance;
-        pickInfo->normalInWorld = sn;
-    }
-
-    uint32_t curResIndex = plp.currentReservoirIndex;
-    Reservoir<LightSample> reservoir = plp.s->reservoirBuffer[curResIndex][launchIndex];
-
-    reservoir.initialize();
-    float selectedTargetDensity = 0.0f;
-    uint32_t numCandidates = 1 << plp.f->log2NumCandidateSamples;
-    for (int i = 0; i < numCandidates; ++i) {
-        LightSample lightSample;
-        float probDensity;
-        float3 cont = sampleUnshadowedContribution(
-            p, vOutLocal, shadingFrame, bsdf,
-            rng.getFloat0cTo1o(), rng.getFloat0cTo1o(), rng.getFloat0cTo1o(),
-            &lightSample, &probDensity);
-        float targetDensity = convertToWeight(cont); // unnormalized
-        float weight = targetDensity / probDensity;
-
-        if (reservoir.update(lightSample, weight, rng.getFloat0cTo1o()))
-            selectedTargetDensity = targetDensity;
-    }
-
-    ReservoirInfo reservoirInfo;
-    reservoirInfo.recPDFEstimate = reservoir.getSumWeights() / (selectedTargetDensity * reservoir.getStreamLength());
-    reservoirInfo.targetDensity = selectedTargetDensity;
-    if (!isfinite(reservoirInfo.recPDFEstimate)) {
-        reservoirInfo.recPDFEstimate = 0.0f;
-        reservoirInfo.targetDensity = 0.0f;
-    }
-
-    if (!evaluateVisibility(p, shadingFrame, reservoir.getSample()) && plp.f->reuseVisibility) {
-        reservoirInfo.recPDFEstimate = 0.0f;
-        reservoirInfo.targetDensity = 0.0f;
-    }
-
-    //uint32_t linearIndex = launchIndex.y * plp.imageSize.x + launchIndex.x;
-    plp.s->rngBuffer.write(launchIndex, rng);
-    plp.s->reservoirBuffer[curResIndex][launchIndex] = reservoir;
-    plp.s->reservoirInfoBuffer[curResIndex].write(launchIndex, reservoirInfo);
 }
 
-//CUDA_DEVICE_KERNEL void RT_AH_NAME(primary)() {
-//    auto sbtr = HitGroupSBTRecordData::get();
-//    const GeometryInstanceData &geomInst = sbtr.geomInstData;
-//    const MaterialData &mat = plp.s->materialDataBuffer[geomInst.materialSlot];
-//}
+
+
+CUDA_DEVICE_KERNEL void RT_RG_NAME(generateInitialCandidates)() {
+    int2 launchIndex = make_int2(optixGetLaunchIndex().x, optixGetLaunchIndex().y);
+
+    PCG32RNG rng = plp.s->rngBuffer.read(launchIndex);
+
+    uint32_t curBufIdx = plp.f->bufferIndex;
+    uint32_t prevBufIdx = (curBufIdx + 1) % 2;
+    GBuffer0 gBuffer0 = plp.s->GBuffer0[curBufIdx].read(launchIndex);
+    GBuffer1 gBuffer1 = plp.s->GBuffer1[curBufIdx].read(launchIndex);
+    GBuffer2 gBuffer2 = plp.s->GBuffer2[curBufIdx].read(launchIndex);
+
+    float3 positionInWorld = gBuffer0.positionInWorld;
+    float3 normalInWorld = gBuffer1.normalInWorld;
+    float2 texCoord = make_float2(gBuffer0.texCoord_x, gBuffer1.texCoord_y);
+    float2 motionVector = gBuffer2.motionVector;
+    uint32_t materialSlot = gBuffer2.materialSlot;
+
+    if (allFinite(positionInWorld)) {
+        PCG32RNG rng = plp.s->rngBuffer.read(launchIndex);
+
+        const MaterialData &mat = plp.s->materialDataBuffer[materialSlot];
+
+        BSDF bsdf;
+        mat.setupBSDF(mat, texCoord, &bsdf);
+        ReferenceFrame shadingFrame(normalInWorld);
+        float3 vOut = plp.f->camera.position - positionInWorld;
+        float dist = length(vOut);
+        vOut /= dist;
+        float3 vOutLocal = shadingFrame.toLocal(vOut);
+
+        uint32_t curResIndex = plp.currentReservoirIndex;
+        Reservoir<LightSample> reservoir = plp.s->reservoirBuffer[curResIndex][launchIndex];
+
+        reservoir.initialize();
+        float selectedTargetDensity = 0.0f;
+        uint32_t numCandidates = 1 << plp.f->log2NumCandidateSamples;
+        for (int i = 0; i < numCandidates; ++i) {
+            LightSample lightSample;
+            float probDensity;
+            float3 cont = sampleUnshadowedContribution(
+                positionInWorld, vOutLocal, shadingFrame, bsdf,
+                rng.getFloat0cTo1o(), rng.getFloat0cTo1o(), rng.getFloat0cTo1o(),
+                &lightSample, &probDensity);
+            float targetDensity = convertToWeight(cont); // unnormalized
+            float weight = targetDensity / probDensity;
+
+            if (reservoir.update(lightSample, weight, rng.getFloat0cTo1o()))
+                selectedTargetDensity = targetDensity;
+        }
+
+        ReservoirInfo reservoirInfo;
+        reservoirInfo.recPDFEstimate = reservoir.getSumWeights() / (selectedTargetDensity * reservoir.getStreamLength());
+        reservoirInfo.targetDensity = selectedTargetDensity;
+        if (!isfinite(reservoirInfo.recPDFEstimate)) {
+            reservoirInfo.recPDFEstimate = 0.0f;
+            reservoirInfo.targetDensity = 0.0f;
+        }
+
+        if (!evaluateVisibility(positionInWorld, shadingFrame, reservoir.getSample()) && plp.f->reuseVisibility) {
+            reservoirInfo.recPDFEstimate = 0.0f;
+            reservoirInfo.targetDensity = 0.0f;
+        }
+
+        //uint32_t linearIndex = launchIndex.y * plp.imageSize.x + launchIndex.x;
+        plp.s->rngBuffer.write(launchIndex, rng);
+        plp.s->reservoirBuffer[curResIndex][launchIndex] = reservoir;
+        plp.s->reservoirInfoBuffer[curResIndex].write(launchIndex, reservoirInfo);
+    }
+}
 
 
 

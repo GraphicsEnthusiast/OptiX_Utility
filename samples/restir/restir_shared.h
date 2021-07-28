@@ -375,5 +375,5 @@ namespace Shared {
     };
 }
 
-#define PrimaryRayPayloadSignature Shared::PCG32RNG, Shared::HitPointParams*, Shared::PickInfo*
+#define PrimaryRayPayloadSignature Shared::HitPointParams*, Shared::PickInfo*
 #define VisibilityRayPayloadSignature float

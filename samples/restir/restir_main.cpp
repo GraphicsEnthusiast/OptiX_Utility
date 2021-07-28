@@ -381,12 +381,13 @@ struct GPUEnvironment {
 
     optixu::Pipeline pipeline;
     optixu::Module mainModule;
-    optixu::ProgramGroup primaryRayGenProgram;
-    optixu::ProgramGroup shadingRayGenProgram;
+    optixu::ProgramGroup setupGBuffersRayGenProgram;
+    optixu::ProgramGroup generateInitialCandidatesRayGenProgram;
     optixu::ProgramGroup combineTemporalNeighborsBiasedRayGenProgram;
     optixu::ProgramGroup combineTemporalNeighborsUnbiasedRayGenProgram;
     optixu::ProgramGroup combineSpatialNeighborsBiasedRayGenProgram;
     optixu::ProgramGroup combineSpatialNeighborsUnbiasedRayGenProgram;
+    optixu::ProgramGroup shadingRayGenProgram;
     optixu::ProgramGroup emptyMissProgram;
     optixu::ProgramGroup primaryHitProgramGroup;
     optixu::ProgramGroup visibilityHitProgramGroup;
@@ -438,10 +439,10 @@ struct GPUEnvironment {
 
         optixu::Module emptyModule;
 
-        primaryRayGenProgram = pipeline.createRayGenProgram(
-            mainModule, RT_RG_NAME_STR("primary"));
-        shadingRayGenProgram = pipeline.createRayGenProgram(
-            mainModule, RT_RG_NAME_STR("shading"));
+        setupGBuffersRayGenProgram = pipeline.createRayGenProgram(
+            mainModule, RT_RG_NAME_STR("setupGBuffers"));
+        generateInitialCandidatesRayGenProgram = pipeline.createRayGenProgram(
+            mainModule, RT_RG_NAME_STR("generateInitialCandidates"));
         combineTemporalNeighborsBiasedRayGenProgram = pipeline.createRayGenProgram(
             mainModule, RT_RG_NAME_STR("combineTemporalNeighborsBiased"));
         combineTemporalNeighborsUnbiasedRayGenProgram = pipeline.createRayGenProgram(
@@ -450,12 +451,14 @@ struct GPUEnvironment {
             mainModule, RT_RG_NAME_STR("combineSpatialNeighborsBiased"));
         combineSpatialNeighborsUnbiasedRayGenProgram = pipeline.createRayGenProgram(
             mainModule, RT_RG_NAME_STR("combineSpatialNeighborsUnbiased"));
+        shadingRayGenProgram = pipeline.createRayGenProgram(
+            mainModule, RT_RG_NAME_STR("shading"));
         //optixu::ProgramGroup exceptionProgram = pipeline.createExceptionProgram(moduleOptiX, "__exception__print");
         emptyMissProgram = pipeline.createMissProgram(emptyModule, nullptr);
 
         primaryHitProgramGroup = pipeline.createHitProgramGroupForBuiltinIS(
             OPTIX_PRIMITIVE_TYPE_TRIANGLE,
-            mainModule, RT_CH_NAME_STR("primary"),
+            mainModule, RT_CH_NAME_STR("setupGBuffers"),
             emptyModule, nullptr);
         visibilityHitProgramGroup = pipeline.createHitProgramGroupForBuiltinIS(
             OPTIX_PRIMITIVE_TYPE_TRIANGLE,
@@ -539,12 +542,13 @@ struct GPUEnvironment {
         visibilityHitProgramGroup.destroy();
         primaryHitProgramGroup.destroy();
         emptyMissProgram.destroy();
+        shadingRayGenProgram.destroy();
         combineSpatialNeighborsUnbiasedRayGenProgram.destroy();
         combineSpatialNeighborsBiasedRayGenProgram.destroy();
         combineTemporalNeighborsUnbiasedRayGenProgram.destroy();
         combineTemporalNeighborsBiasedRayGenProgram.destroy();
-        shadingRayGenProgram.destroy();
-        primaryRayGenProgram.destroy();
+        generateInitialCandidatesRayGenProgram.destroy();
+        setupGBuffersRayGenProgram.destroy();
         mainModule.destroy();
 
         pipeline.destroy();
@@ -951,44 +955,16 @@ void createTriangleMeshes(const std::filesystem::path &filePath,
         }
 
         if (aiMat->Get(AI_MATKEY_TEXTURE_EMISSIVE(0), strValue) == aiReturn_SUCCESS) {
-            printf("");
-        }
-        else if (aiMat->Get(AI_MATKEY_COLOR_EMISSIVE, color, nullptr) == aiReturn_SUCCESS) {
-            emittanceScale = float3(color[0], color[1], color[2]);
-        }
-        else {
-            emittanceScale = float3(0.0f);
+            emittancePath = dirPath / strValue.C_Str();
         }
 
-        if (matName == "Paris_StringLights_01_White_Color") {
-            emittanceScale = float3(20, 20, 20);
-        }
-        else if (matName == "Paris_StringLights_01_Green_Color") {
-            emittanceScale = float3(0, 50, 0);
-        }
-        else if (matName == "Paris_StringLights_01_Red_Color") {
-            emittanceScale = float3(50, 0, 0);
-        }
-        if (matName == "Paris_StringLights_01_Blue_Color") {
-            emittanceScale = float3(0, 0, 50);
-        }
-        else if (matName == "Paris_StringLights_01_Pink_Color") {
-            emittanceScale = float3(30, 10, 10);
-        }
-        else if (matName == "Paris_StringLights_01_Orange_Color") {
-            emittanceScale = float3(35, 15, 0);
-        }
-        else if (matName == "Streetlight_Glass") {
-            emittanceScale = float3(35, 30, 20);
-        }
-        else if (matName == "Lantern") {
-            emittancePath = dirPath / "../PropTextures/Street/Paris_Lantern_01/Paris_Lantern_01A_emi.png";
-            emittanceScale = float3(35, 20, 5);
-        }
-        else if (matName == "MASTER_Focus_Glass") {
-            emittanceScale = float3(35, 30, 30);
-        }
-        emittanceScale *= 10;
+        if (aiMat->Get(AI_MATKEY_COLOR_EMISSIVE, color, nullptr) == aiReturn_SUCCESS)
+            emittanceScale = float3(color[0], color[1], color[2]);
+        else
+            emittanceScale = float3(0.0f);
+
+        if (!emittancePath.empty() && emittanceScale == float3(0.0f))
+            emittanceScale = float3(1.0f);
 
         materials.push_back(createLambertMaterial(
             gpuEnv,
@@ -1984,18 +1960,30 @@ int32_t main(int32_t argc, const char* argv[]) try {
     struct GPUTimer {
         cudau::Timer frame;
         cudau::Timer update;
-        cudau::Timer render;
+        cudau::Timer setupGBuffers;
+        cudau::Timer generateInitialCandidates;
+        cudau::Timer combineTemporalNeighbors;
+        cudau::Timer combineSpatialNeighbors;
+        cudau::Timer shading;
         cudau::Timer denoise;
 
         void initialize(CUcontext context) {
             frame.initialize(context);
             update.initialize(context);
-            render.initialize(context);
+            setupGBuffers.initialize(context);
+            generateInitialCandidates.initialize(context);
+            combineTemporalNeighbors.initialize(context);
+            combineSpatialNeighbors.initialize(context);
+            shading.initialize(context);
             denoise.initialize(context);
         }
         void finalize() {
             denoise.finalize();
-            render.finalize();
+            shading.finalize();
+            combineSpatialNeighbors.finalize();
+            combineTemporalNeighbors.finalize();
+            generateInitialCandidates.finalize();
+            setupGBuffers.finalize();
             update.finalize();
             frame.finalize();
         }
@@ -2189,7 +2177,7 @@ int32_t main(int32_t argc, const char* argv[]) try {
                                                        rollPitchYaw[1] * M_PI / 180,
                                                        rollPitchYaw[2] * M_PI / 180);
             ImGui::Text("Pos. Speed (T/G): %g", g_cameraPositionalMovingSpeed);
-            ImGui::SliderFloat("Brightness", &brightness, -2.0f, 2.0f);
+            ImGui::SliderFloat("Brightness", &brightness, -5.0f, 5.0f);
 
             ImGui::End();
         }
@@ -2331,12 +2319,20 @@ int32_t main(int32_t argc, const char* argv[]) try {
 
             float cudaFrameTime = frameIndex >= 2 ? curGPUTimer.frame.report() : 0.0f;
             float updateTime = frameIndex >= 2 ? curGPUTimer.update.report() : 0.0f;
-            float renderTime = frameIndex >= 2 ? curGPUTimer.render.report() : 0.0f;
+            float setupGBuffersTime = frameIndex >= 2 ? curGPUTimer.setupGBuffers.report() : 0.0f;
+            float generateInitialCandidatesTime = frameIndex >= 2 ? curGPUTimer.generateInitialCandidates.report() : 0.0f;
+            float combineTemporalNeighborsTime = frameIndex >= 2 ? curGPUTimer.combineTemporalNeighbors.report() : 0.0f;
+            float combineSpatialNeighborsTime = frameIndex >= 2 ? curGPUTimer.combineSpatialNeighbors.report() : 0.0f;
+            float shadingTime = frameIndex >= 2 ? curGPUTimer.combineSpatialNeighbors.report() : 0.0f;
             float denoiseTime = frameIndex >= 2 ? curGPUTimer.denoise.report() : 0.0f;
             //ImGui::SetNextItemWidth(100.0f);
             ImGui::Text("CUDA/OptiX GPU %.3f [ms]:", cudaFrameTime);
             ImGui::Text("  Update: %.3f [ms]", updateTime);
-            ImGui::Text("  Render: %.3f [ms]", renderTime);
+            ImGui::Text("  setupGBuffers: %.3f [ms]", setupGBuffersTime);
+            ImGui::Text("  generateInitialCandidates: %.3f [ms]", generateInitialCandidatesTime);
+            ImGui::Text("  combineTemporalNeighbors: %.3f [ms]", combineTemporalNeighborsTime);
+            ImGui::Text("  combineSpatialNeighbors: %.3f [ms]", combineSpatialNeighborsTime);
+            ImGui::Text("  shading: %.3f [ms]", shadingTime);
             ImGui::Text("  Denoise: %.3f [ms]", denoiseTime);
 
             ImGui::End();
@@ -2405,17 +2401,23 @@ int32_t main(int32_t argc, const char* argv[]) try {
 
         CUDADRV_CHECK(cuMemcpyHtoDAsync(perFramePlpOnDevice, &perFramePlp, sizeof(perFramePlp), cuStream));
 
-        // Render
-        curGPUTimer.render.start(cuStream);
-
         uint32_t currentReservoirIndex = (lastReservoirIndex + 1) % 2;
         //hpprintf("%u\n", currentReservoirIndex);
 
         plp.currentReservoirIndex = currentReservoirIndex;
         CUDADRV_CHECK(cuMemcpyHtoDAsync(plpOnDevice, &plp, sizeof(plp), cuStream));
-        gpuEnv.pipeline.setRayGenerationProgram(gpuEnv.primaryRayGenProgram);
-        gpuEnv.pipeline.launch(cuStream, plpOnDevice, renderTargetSizeX, renderTargetSizeY, 1);
 
+        curGPUTimer.setupGBuffers.start(cuStream);
+        gpuEnv.pipeline.setRayGenerationProgram(gpuEnv.setupGBuffersRayGenProgram);
+        gpuEnv.pipeline.launch(cuStream, plpOnDevice, renderTargetSizeX, renderTargetSizeY, 1);
+        curGPUTimer.setupGBuffers.stop(cuStream);
+
+        curGPUTimer.generateInitialCandidates.start(cuStream);
+        gpuEnv.pipeline.setRayGenerationProgram(gpuEnv.generateInitialCandidatesRayGenProgram);
+        gpuEnv.pipeline.launch(cuStream, plpOnDevice, renderTargetSizeX, renderTargetSizeY, 1);
+        curGPUTimer.generateInitialCandidates.stop(cuStream);
+
+        curGPUTimer.combineTemporalNeighbors.start(cuStream);
         if (enableTemporalReuse && !newSequence) {
             if (useUnbiasedEstimator)
                 gpuEnv.pipeline.setRayGenerationProgram(gpuEnv.combineTemporalNeighborsUnbiasedRayGenProgram);
@@ -2423,7 +2425,9 @@ int32_t main(int32_t argc, const char* argv[]) try {
                 gpuEnv.pipeline.setRayGenerationProgram(gpuEnv.combineTemporalNeighborsBiasedRayGenProgram);
             gpuEnv.pipeline.launch(cuStream, plpOnDevice, renderTargetSizeX, renderTargetSizeY, 1);
         }
+        curGPUTimer.combineTemporalNeighbors.stop(cuStream);
 
+        curGPUTimer.combineSpatialNeighbors.start(cuStream);
         if (enableSpatialReuse) {
             int32_t numSpatialReusePasses;
             if (useUnbiasedEstimator) {
@@ -2444,11 +2448,13 @@ int32_t main(int32_t argc, const char* argv[]) try {
             }
             lastSpatialNeighborBaseIndex += numSpatialNeighborsBiased * numSpatialReusePasses;
         }
+        curGPUTimer.combineSpatialNeighbors.stop(cuStream);
 
+        curGPUTimer.shading.start(cuStream);
         CUDADRV_CHECK(cuMemcpyHtoDAsync(plpOnDevice, &plp, sizeof(plp), cuStream));
         gpuEnv.pipeline.setRayGenerationProgram(gpuEnv.shadingRayGenProgram);
         gpuEnv.pipeline.launch(cuStream, plpOnDevice, renderTargetSizeX, renderTargetSizeY, 1);
-        curGPUTimer.render.stop(cuStream);
+        curGPUTimer.shading.stop(cuStream);
 
         lastReservoirIndex = currentReservoirIndex;
 
@@ -2468,14 +2474,6 @@ int32_t main(int32_t argc, const char* argv[]) try {
                                   linearFlowBuffer.getDevicePointer(),
                                   uint2(renderTargetSizeX, renderTargetSizeY));
 
-        // JP: パストレーシング結果のデノイズ。
-        //     毎フレーム呼ぶ必要があるのはcomputeIntensity()とinvoke()。
-        //     computeIntensity()は自作することもできる。
-        //     サイズが足りていればcomputeIntensity()のスクラッチバッファーとしてデノイザーのものが再利用できる。
-        // EN: Denoise the path tracing result.
-        //     computeIntensity() and invoke() should be calld every frame.
-        //     You can also create a custom computeIntensity().
-        //     Reusing the scratch buffer for denoising for computeIntensity() is possible if its size is enough.
         denoiser.computeIntensity(cuStream,
                                   linearBeautyBuffer, OPTIX_PIXEL_FORMAT_FLOAT4,
                                   denoiserScratchBuffer, hdrIntensity);
