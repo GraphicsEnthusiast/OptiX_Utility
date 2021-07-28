@@ -46,11 +46,25 @@ CUDA_DEVICE_KERNEL void visualizeToOutputBuffer(
     case Shared::BufferToDisplay::NoisyBeauty:
     case Shared::BufferToDisplay::DenoisedBeauty: {
         auto typedLinearBuffer = reinterpret_cast<float4*>(linearBuffer);
-        value = brightness * typedLinearBuffer[linearIndex];
+        //value = brightness * typedLinearBuffer[linearIndex];
+        //// simple tone-map
+        //value.x = 1 - std::exp(-value.x);
+        //value.y = 1 - std::exp(-value.y);
+        //value.z = 1 - std::exp(-value.z);
+
+        value = typedLinearBuffer[linearIndex];
+        float lum = sRGB_calcLuminance(make_float3(value));
+        float lumT = 1 - std::exp(-brightness * lum);
         // simple tone-map
-        value.x = 1 - std::exp(-value.x);
-        value.y = 1 - std::exp(-value.y);
-        value.z = 1 - std::exp(-value.z);
+        value = value * (lumT / lum);
+
+        //const auto reinhard = [](float x, float Lw) {
+        //    return x / (1 + x) * (1 + x / (Lw * Lw));
+        //};
+        //value = brightness * typedLinearBuffer[linearIndex];
+        //value.x = reinhard(value.x, 1.0f);
+        //value.y = reinhard(value.y, 1.0f);
+        //value.z = reinhard(value.z, 1.0f);
         break;
     }
     case Shared::BufferToDisplay::Albedo: {

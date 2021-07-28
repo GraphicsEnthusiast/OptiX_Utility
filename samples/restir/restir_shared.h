@@ -175,13 +175,12 @@ namespace Shared {
                 CUtexObject reflectance;
             } asLambert;
             struct {
-                CUtexObject baseColor;
+                CUtexObject diffuse;
                 CUtexObject specular;
                 CUtexObject smoothness;
             } asDiffuseAndSpecular;
         };
         CUtexObject emittance;
-        float3 emittanceScale;
 
         SetupBSDF setupBSDF;
         GetBaseColor getBaseColor;

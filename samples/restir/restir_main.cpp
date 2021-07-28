@@ -58,26 +58,27 @@ struct KeyState {
     }
 };
 
-KeyState g_keyForward;
-KeyState g_keyBackward;
-KeyState g_keyLeftward;
-KeyState g_keyRightward;
-KeyState g_keyUpward;
-KeyState g_keyDownward;
-KeyState g_keyTiltLeft;
-KeyState g_keyTiltRight;
-KeyState g_keyFasterPosMovSpeed;
-KeyState g_keySlowerPosMovSpeed;
-KeyState g_buttonRotate;
-double g_mouseX;
-double g_mouseY;
+static KeyState g_keyForward;
+static KeyState g_keyBackward;
+static KeyState g_keyLeftward;
+static KeyState g_keyRightward;
+static KeyState g_keyUpward;
+static KeyState g_keyDownward;
+static KeyState g_keyTiltLeft;
+static KeyState g_keyTiltRight;
+static KeyState g_keyFasterPosMovSpeed;
+static KeyState g_keySlowerPosMovSpeed;
+static KeyState g_buttonRotate;
+static double g_mouseX;
+static double g_mouseY;
 
-float g_cameraPositionalMovingSpeed;
-float g_cameraDirectionalMovingSpeed;
-float g_cameraTiltSpeed;
-Quaternion g_cameraOrientation;
-Quaternion g_tempCameraOrientation;
-float3 g_cameraPosition;
+static float g_initBrightness = 0.0f;
+static float g_cameraPositionalMovingSpeed;
+static float g_cameraDirectionalMovingSpeed;
+static float g_cameraTiltSpeed;
+static Quaternion g_cameraOrientation;
+static Quaternion g_tempCameraOrientation;
+static float3 g_cameraPosition;
 
 struct MeshGeometryInfo {
     std::filesystem::path path;
@@ -106,7 +107,7 @@ struct MeshInstanceInfo {
 static bool g_takeScreenShot = false;
 
 using MeshInfo = std::variant<MeshGeometryInfo, RectangleGeometryInfo>;
-std::map<std::string, MeshInfo> g_meshInfos;
+static std::map<std::string, MeshInfo> g_meshInfos;
 static std::vector<MeshInstanceInfo> g_meshInstInfos;
 
 static void parseCommandline(int32_t argc, const char* argv[]) {
@@ -176,6 +177,14 @@ static void parseCommandline(int32_t argc, const char* argv[]) {
                  strncmp(arg, "-cam-pitch", 11) == 0 ||
                  strncmp(arg, "-cam-yaw", 9) == 0) {
             computeOrientation(arg + 4, &camOrientation);
+        }
+        else if (strncmp(arg, "-brightness", 12) == 0) {
+            if (i + 1 >= argc) {
+                hpprintf("Invalid option.\n");
+                exit(EXIT_FAILURE);
+            }
+            g_initBrightness = std::fmin(std::fmax(std::atof(argv[i + 1]), -5.0f), 5.0f);
+            i += 1;
         }
         else if (strncmp(arg, "-name", 6) == 0) {
             if (i + 1 >= argc) {
@@ -629,8 +638,8 @@ struct Material {
         CUtexObject texReflectance;
     };
     struct DiffuseAndSpecular {
-        cudau::Array baseColor;
-        CUtexObject texBaseColor;
+        cudau::Array diffuse;
+        CUtexObject texDiffuse;
         cudau::Array specular;
         CUtexObject texSpecular;
         cudau::Array smoothness;
@@ -641,7 +650,6 @@ struct Material {
     CUtexObject texNormal;
     cudau::Array emittance;
     CUtexObject texEmittance;
-    float3 emittanceScale;
     uint32_t materialSlot;
 
     Material() {}
@@ -689,8 +697,8 @@ struct FlattenedNode {
     std::vector<uint32_t> meshIndices;
 };
 
-void computeFlattenedNodes(const aiScene* scene, const Matrix4x4 &parentXfm, const aiNode* curNode,
-                           std::vector<FlattenedNode> &flattenedNodes) {
+static void computeFlattenedNodes(const aiScene* scene, const Matrix4x4 &parentXfm, const aiNode* curNode,
+                                  std::vector<FlattenedNode> &flattenedNodes) {
     aiMatrix4x4 curAiXfm = curNode->mTransformation;
     Matrix4x4 curXfm = Matrix4x4(float4(curAiXfm.a1, curAiXfm.a2, curAiXfm.a3, curAiXfm.a4),
                                  float4(curAiXfm.b1, curAiXfm.b2, curAiXfm.b3, curAiXfm.b4),
@@ -706,10 +714,10 @@ void computeFlattenedNodes(const aiScene* scene, const Matrix4x4 &parentXfm, con
         computeFlattenedNodes(scene, flattenedNode.transform, curNode->mChildren[cIdx], flattenedNodes);
 }
 
-Material* createLambertMaterial(
+static Material* createLambertMaterial(
     GPUEnvironment &gpuEnv,
     const std::filesystem::path &reflectancePath, const float3 &immReflectance,
-    const std::filesystem::path &emittancePath, const float3 &emittanceScale) {
+    const std::filesystem::path &emittancePath, const float3 &immEmittance) {
     Shared::MaterialData* matDataOnHost = gpuEnv.materialDataBuffer.getMappedPointer();
 
     cudau::TextureSampler sampler_sRGB;
@@ -718,6 +726,13 @@ Material* createLambertMaterial(
     sampler_sRGB.setWrapMode(1, cudau::TextureWrapMode::Repeat);
     sampler_sRGB.setMipMapFilterMode(cudau::TextureFilterMode::Point);
     sampler_sRGB.setReadMode(cudau::TextureReadMode::NormalizedFloat_sRGB);
+
+    cudau::TextureSampler sampler_float;
+    sampler_float.setXyFilterMode(cudau::TextureFilterMode::Linear);
+    sampler_float.setWrapMode(0, cudau::TextureWrapMode::Repeat);
+    sampler_float.setWrapMode(1, cudau::TextureWrapMode::Repeat);
+    sampler_float.setMipMapFilterMode(cudau::TextureFilterMode::Point);
+    sampler_float.setReadMode(cudau::TextureReadMode::ElementType);
 
     cudau::TextureSampler sampler;
     sampler.setXyFilterMode(cudau::TextureFilterMode::Linear);
@@ -758,6 +773,17 @@ Material* createLambertMaterial(
 
     if (emittancePath.empty()) {
         mat->texEmittance = 0;
+        if (immEmittance != float3(0.0f, 0.0f, 0.0f)) {
+            float data[4] = {
+                immEmittance.x, immEmittance.y, immEmittance.z, 1.0f
+            };
+            mat->emittance.initialize2D(
+                gpuEnv.cuContext, cudau::ArrayElementType::Float32, 4,
+                cudau::ArraySurface::Disable, cudau::ArrayTextureGather::Disable,
+                1, 1, 1);
+            mat->emittance.write(data, 4);
+            mat->texEmittance = sampler_float.createTextureObject(mat->emittance);
+        }
     }
     else {
         int32_t width, height, n;
@@ -773,7 +799,6 @@ Material* createLambertMaterial(
         stbi_image_free(linearImageData);
         mat->texEmittance = sampler_sRGB.createTextureObject(mat->emittance);
     }
-    mat->emittanceScale = emittanceScale;
 
     mat->materialSlot = gpuEnv.materialSlotFinder.getFirstAvailableSlot();
     gpuEnv.materialSlotFinder.setInUse(mat->materialSlot);
@@ -781,7 +806,6 @@ Material* createLambertMaterial(
     Shared::MaterialData matData = {};
     matData.asLambert.reflectance = body.texReflectance;
     matData.emittance = mat->texEmittance;
-    matData.emittanceScale = mat->emittanceScale;
     matData.setupBSDF = Shared::SetupBSDF(CallableProgram_SetupLambertBRDF);
     matData.getBaseColor = Shared::GetBaseColor(CallableProgram_LambertBRDF_getBaseColor);
     matData.evaluateBSDF = Shared::EvaluateBSDF(CallableProgram_LambertBRDF_evaluate);
@@ -790,7 +814,148 @@ Material* createLambertMaterial(
     return mat;
 }
 
-GeometryInstance* createGeometryInstance(
+static Material* createDiffuseAndSpecularMaterial(
+    GPUEnvironment &gpuEnv,
+    const std::filesystem::path &diffuseColorPath, const float3 &immDiffuseColor,
+    const std::filesystem::path &specularColorPath, const float3 &immSpecularColor,
+    const std::filesystem::path &emittancePath, const float3 &immEmittance) {
+    Shared::MaterialData* matDataOnHost = gpuEnv.materialDataBuffer.getMappedPointer();
+
+    cudau::TextureSampler sampler_sRGB;
+    sampler_sRGB.setXyFilterMode(cudau::TextureFilterMode::Linear);
+    sampler_sRGB.setWrapMode(0, cudau::TextureWrapMode::Repeat);
+    sampler_sRGB.setWrapMode(1, cudau::TextureWrapMode::Repeat);
+    sampler_sRGB.setMipMapFilterMode(cudau::TextureFilterMode::Point);
+    sampler_sRGB.setReadMode(cudau::TextureReadMode::NormalizedFloat_sRGB);
+
+    cudau::TextureSampler sampler_float;
+    sampler_float.setXyFilterMode(cudau::TextureFilterMode::Linear);
+    sampler_float.setWrapMode(0, cudau::TextureWrapMode::Repeat);
+    sampler_float.setWrapMode(1, cudau::TextureWrapMode::Repeat);
+    sampler_float.setMipMapFilterMode(cudau::TextureFilterMode::Point);
+    sampler_float.setReadMode(cudau::TextureReadMode::ElementType);
+
+    cudau::TextureSampler sampler;
+    sampler.setXyFilterMode(cudau::TextureFilterMode::Linear);
+    sampler.setWrapMode(0, cudau::TextureWrapMode::Repeat);
+    sampler.setWrapMode(1, cudau::TextureWrapMode::Repeat);
+    sampler.setMipMapFilterMode(cudau::TextureFilterMode::Point);
+    sampler.setReadMode(cudau::TextureReadMode::NormalizedFloat);
+
+    Material* mat = new Material();
+
+    mat->body = Material::DiffuseAndSpecular();
+    auto &body = std::get<Material::DiffuseAndSpecular>(mat->body);
+
+    if (diffuseColorPath.empty()) {
+        uint32_t data = ((std::min<uint32_t>(255 * immDiffuseColor.x, 255) << 0) |
+                         (std::min<uint32_t>(255 * immDiffuseColor.y, 255) << 8) |
+                         (std::min<uint32_t>(255 * immDiffuseColor.z, 255) << 16) |
+                         255 << 24);
+        body.diffuse.initialize2D(
+            gpuEnv.cuContext, cudau::ArrayElementType::UInt8, 4,
+            cudau::ArraySurface::Disable, cudau::ArrayTextureGather::Disable,
+            1, 1, 1);
+        body.diffuse.write<uint8_t>(reinterpret_cast<uint8_t*>(&data), 4);
+    }
+    else {
+        int32_t width, height, n;
+        hpprintf("Reading: %s ... ", diffuseColorPath.string().c_str());
+        uint8_t* linearImageData = stbi_load(diffuseColorPath.string().c_str(),
+                                             &width, &height, &n, 4);
+        hpprintf("done.\n");
+        body.diffuse.initialize2D(
+            gpuEnv.cuContext, cudau::ArrayElementType::UInt8, 4,
+            cudau::ArraySurface::Disable, cudau::ArrayTextureGather::Disable,
+            width, height, 1);
+        body.diffuse.write<uint8_t>(linearImageData, width * height * 4);
+        stbi_image_free(linearImageData);
+    }
+    body.texDiffuse = sampler_sRGB.createTextureObject(body.diffuse);
+
+    if (specularColorPath.empty()) {
+        uint32_t data = ((std::min<uint32_t>(255 * immSpecularColor.x, 255) << 0) |
+                         (std::min<uint32_t>(255 * immSpecularColor.y, 255) << 8) |
+                         (std::min<uint32_t>(255 * immSpecularColor.z, 255) << 16) |
+                         255 << 24);
+        body.specular.initialize2D(
+            gpuEnv.cuContext, cudau::ArrayElementType::UInt8, 4,
+            cudau::ArraySurface::Disable, cudau::ArrayTextureGather::Disable,
+            1, 1, 1);
+        body.specular.write<uint8_t>(reinterpret_cast<uint8_t*>(&data), 4);
+    }
+    else {
+        int32_t width, height, n;
+        hpprintf("Reading: %s ... ", specularColorPath.string().c_str());
+        uint8_t* linearImageData = stbi_load(specularColorPath.string().c_str(),
+                                             &width, &height, &n, 4);
+        hpprintf("done.\n");
+        body.specular.initialize2D(
+            gpuEnv.cuContext, cudau::ArrayElementType::UInt8, 4,
+            cudau::ArraySurface::Disable, cudau::ArrayTextureGather::Disable,
+            width, height, 1);
+        body.specular.write<uint8_t>(linearImageData, width * height * 4);
+        stbi_image_free(linearImageData);
+    }
+    body.texSpecular = sampler_sRGB.createTextureObject(body.specular);
+
+    {
+        constexpr float immSmoothness = 0.7f;
+        uint8_t data = std::min<uint32_t>(255 * immSmoothness, 255);
+        body.smoothness.initialize2D(
+            gpuEnv.cuContext, cudau::ArrayElementType::UInt8, 1,
+            cudau::ArraySurface::Disable, cudau::ArrayTextureGather::Disable,
+            1, 1, 1);
+        body.smoothness.write<uint8_t>(reinterpret_cast<uint8_t*>(&data), 1);
+    }
+    body.texSmoothness = sampler_sRGB.createTextureObject(body.smoothness);
+
+    if (emittancePath.empty()) {
+        mat->texEmittance = 0;
+        if (immEmittance != float3(0.0f, 0.0f, 0.0f)) {
+            float data[4] = {
+                immEmittance.x, immEmittance.y, immEmittance.z, 1.0f
+            };
+            mat->emittance.initialize2D(
+                gpuEnv.cuContext, cudau::ArrayElementType::Float32, 4,
+                cudau::ArraySurface::Disable, cudau::ArrayTextureGather::Disable,
+                1, 1, 1);
+            mat->emittance.write(data, 4);
+            mat->texEmittance = sampler_float.createTextureObject(mat->emittance);
+        }
+    }
+    else {
+        int32_t width, height, n;
+        hpprintf("Reading: %s ... ", emittancePath.string().c_str());
+        uint8_t* linearImageData = stbi_load(emittancePath.string().c_str(),
+                                             &width, &height, &n, 4);
+        hpprintf("done.\n");
+        mat->emittance.initialize2D(
+            gpuEnv.cuContext, cudau::ArrayElementType::UInt8, 4,
+            cudau::ArraySurface::Disable, cudau::ArrayTextureGather::Disable,
+            width, height, 1);
+        mat->emittance.write<uint8_t>(linearImageData, width * height * 4);
+        stbi_image_free(linearImageData);
+        mat->texEmittance = sampler_sRGB.createTextureObject(mat->emittance);
+    }
+
+    mat->materialSlot = gpuEnv.materialSlotFinder.getFirstAvailableSlot();
+    gpuEnv.materialSlotFinder.setInUse(mat->materialSlot);
+
+    Shared::MaterialData matData = {};
+    matData.asDiffuseAndSpecular.diffuse = body.texDiffuse;
+    matData.asDiffuseAndSpecular.specular = body.texSpecular;
+    matData.asDiffuseAndSpecular.smoothness = body.texSmoothness;
+    matData.emittance = mat->texEmittance;
+    matData.setupBSDF = Shared::SetupBSDF(CallableProgram_SetupDiffuseAndSpecularBRDF);
+    matData.getBaseColor = Shared::GetBaseColor(CallableProgram_DiffuseAndSpecularBRDF_getBaseColor);
+    matData.evaluateBSDF = Shared::EvaluateBSDF(CallableProgram_DiffuseAndSpecularBRDF_evaluate);
+    matDataOnHost[mat->materialSlot] = matData;
+
+    return mat;
+}
+
+static GeometryInstance* createGeometryInstance(
     GPUEnvironment &gpuEnv,
     const std::vector<Shared::Vertex> &vertices,
     const std::vector<Shared::Triangle> &triangles,
@@ -798,7 +963,7 @@ GeometryInstance* createGeometryInstance(
     Shared::GeometryInstanceData* geomInstDataOnHost = gpuEnv.geomInstDataBuffer.getMappedPointer();
 
     std::vector<float> emitterImportances(triangles.size());
-    float lumEmittance = Shared::convertToWeight(mat->emittanceScale);
+    float lumEmittance = mat->texEmittance ? 1.0f : 0.0f;
     for (int triIdx = 0; triIdx < emitterImportances.size(); ++triIdx) {
         const Shared::Triangle &tri = triangles[triIdx];
         const Shared::Vertex (&vs)[3] = {
@@ -839,7 +1004,7 @@ GeometryInstance* createGeometryInstance(
     return geomInst;
 }
 
-GeometryGroup* createGeometryGroup(
+static GeometryGroup* createGeometryGroup(
     GPUEnvironment &gpuEnv,
     const std::set<const GeometryInstance*> &geomInsts) {
     GeometryGroup* geomGroup = new GeometryGroup();
@@ -850,7 +1015,7 @@ GeometryGroup* createGeometryGroup(
     for (auto it = geomInsts.cbegin(); it != geomInsts.cend(); ++it) {
         const GeometryInstance* geominst = *it;
         geomGroup->optixGas.addChild(geominst->optixGeomInst);
-        if (geominst->mat->emittanceScale != float3(0.0f))
+        if (geominst->mat->texEmittance)
             geomGroup->numEmitterPrimitives += geominst->triangleBuffer.numElements();
     }
     geomGroup->optixGas.setNumMaterialSets(1);
@@ -859,7 +1024,7 @@ GeometryGroup* createGeometryGroup(
     return geomGroup;
 }
 
-Instance* createInstance(
+static Instance* createInstance(
     GPUEnvironment &gpuEnv,
     const GeometryGroup* geomGroup,
     const Matrix4x4 &transform) {
@@ -903,13 +1068,14 @@ Instance* createInstance(
     return inst;
 }
 
-void createTriangleMeshes(const std::filesystem::path &filePath,
-                          const Matrix4x4 &preTransform,
-                          GPUEnvironment &gpuEnv,
-                          std::vector<Material*> &materials,
-                          std::vector<GeometryInstance*> &geomInsts,
-                          std::vector<GeometryGroup*> &geomGroups,
-                          Mesh* mesh) {
+static void createTriangleMeshes(
+    const std::filesystem::path &filePath,
+    const Matrix4x4 &preTransform,
+    GPUEnvironment &gpuEnv,
+    std::vector<Material*> &materials,
+    std::vector<GeometryInstance*> &geomInsts,
+    std::vector<GeometryGroup*> &geomGroups,
+    Mesh* mesh) {
     hpprintf("Reading: %s ... ", filePath.string().c_str());
     fflush(stdout);
     Assimp::Importer importer;
@@ -1037,16 +1203,17 @@ void createTriangleMeshes(const std::filesystem::path &filePath,
     }
 }
 
-void createRectangleLight(float width, float depth,
-                          const float3 &reflectance,
-                          const std::filesystem::path &emittancePath,
-                          const float3 &emittanceScale,
-                          const Matrix4x4 &transform,
-                          GPUEnvironment &gpuEnv,
-                          Material** material,
-                          GeometryInstance** geomInst,
-                          GeometryGroup** geomGroup,
-                          Mesh* mesh) {
+static void createRectangleLight(
+    float width, float depth,
+    const float3 &reflectance,
+    const std::filesystem::path &emittancePath,
+    const float3 &emittanceScale,
+    const Matrix4x4 &transform,
+    GPUEnvironment &gpuEnv,
+    Material** material,
+    GeometryInstance** geomInst,
+    GeometryGroup** geomGroup,
+    Mesh* mesh) {
     *material = createLambertMaterial(gpuEnv, "", reflectance, emittancePath, emittanceScale);
 
     std::vector<Shared::Vertex> vertices = {
@@ -1071,15 +1238,16 @@ void createRectangleLight(float width, float depth,
     mesh->groups.push_back(g);
 }
 
-void createSphereLight(float radius,
-                       const std::filesystem::path &emittancePath,
-                       const float3 &emittanceScale,
-                       const float3 &position,
-                       GPUEnvironment &gpuEnv,
-                       Material** material,
-                       GeometryInstance** geomInst,
-                       GeometryGroup** geomGroup,
-                       Mesh* mesh) {
+static void createSphereLight(
+    float radius,
+    const std::filesystem::path &emittancePath,
+    const float3 &emittanceScale,
+    const float3 &position,
+    GPUEnvironment &gpuEnv,
+    Material** material,
+    GeometryInstance** geomInst,
+    GeometryGroup** geomGroup,
+    Mesh* mesh) {
     *material = createLambertMaterial(gpuEnv, "", float3(0.8f), emittancePath, emittanceScale);
 
     constexpr uint32_t numZenithSegments = 8;
@@ -2159,7 +2327,7 @@ int32_t main(int32_t argc, const char* argv[]) try {
 
 
         // Camera Window
-        static float brightness = 0.0f;
+        static float brightness = g_initBrightness;
         {
             ImGui::Begin("Camera", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
 
@@ -2317,23 +2485,33 @@ int32_t main(int32_t argc, const char* argv[]) try {
         {
             ImGui::Begin("Stats", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
 
-            float cudaFrameTime = frameIndex >= 2 ? curGPUTimer.frame.report() : 0.0f;
-            float updateTime = frameIndex >= 2 ? curGPUTimer.update.report() : 0.0f;
-            float setupGBuffersTime = frameIndex >= 2 ? curGPUTimer.setupGBuffers.report() : 0.0f;
-            float generateInitialCandidatesTime = frameIndex >= 2 ? curGPUTimer.generateInitialCandidates.report() : 0.0f;
-            float combineTemporalNeighborsTime = frameIndex >= 2 ? curGPUTimer.combineTemporalNeighbors.report() : 0.0f;
-            float combineSpatialNeighborsTime = frameIndex >= 2 ? curGPUTimer.combineSpatialNeighbors.report() : 0.0f;
-            float shadingTime = frameIndex >= 2 ? curGPUTimer.combineSpatialNeighbors.report() : 0.0f;
-            float denoiseTime = frameIndex >= 2 ? curGPUTimer.denoise.report() : 0.0f;
+            static MovingAverageTime cudaFrameTime;
+            static MovingAverageTime updateTime;
+            static MovingAverageTime setupGBuffersTime;
+            static MovingAverageTime generateInitialCandidatesTime;
+            static MovingAverageTime combineTemporalNeighborsTime;
+            static MovingAverageTime combineSpatialNeighborsTime;
+            static MovingAverageTime shadingTime;
+            static MovingAverageTime denoiseTime;
+
+            cudaFrameTime.append(frameIndex >= 2 ? curGPUTimer.frame.report() : 0.0f);
+            updateTime.append(frameIndex >= 2 ? curGPUTimer.update.report() : 0.0f);
+            setupGBuffersTime.append(frameIndex >= 2 ? curGPUTimer.setupGBuffers.report() : 0.0f);
+            generateInitialCandidatesTime.append(frameIndex >= 2 ? curGPUTimer.generateInitialCandidates.report() : 0.0f);
+            combineTemporalNeighborsTime.append(frameIndex >= 2 ? curGPUTimer.combineTemporalNeighbors.report() : 0.0f);
+            combineSpatialNeighborsTime.append(frameIndex >= 2 ? curGPUTimer.combineSpatialNeighbors.report() : 0.0f);
+            shadingTime.append(frameIndex >= 2 ? curGPUTimer.shading.report() : 0.0f);
+            denoiseTime.append(frameIndex >= 2 ? curGPUTimer.denoise.report() : 0.0f);
+
             //ImGui::SetNextItemWidth(100.0f);
-            ImGui::Text("CUDA/OptiX GPU %.3f [ms]:", cudaFrameTime);
-            ImGui::Text("  Update: %.3f [ms]", updateTime);
-            ImGui::Text("  setupGBuffers: %.3f [ms]", setupGBuffersTime);
-            ImGui::Text("  generateInitialCandidates: %.3f [ms]", generateInitialCandidatesTime);
-            ImGui::Text("  combineTemporalNeighbors: %.3f [ms]", combineTemporalNeighborsTime);
-            ImGui::Text("  combineSpatialNeighbors: %.3f [ms]", combineSpatialNeighborsTime);
-            ImGui::Text("  shading: %.3f [ms]", shadingTime);
-            ImGui::Text("  Denoise: %.3f [ms]", denoiseTime);
+            ImGui::Text("CUDA/OptiX GPU %.3f [ms]:", cudaFrameTime.getAverage());
+            ImGui::Text("  Update: %.3f [ms]", updateTime.getAverage());
+            ImGui::Text("  setupGBuffers: %.3f [ms]", setupGBuffersTime.getAverage());
+            ImGui::Text("  generateInitialCandidates: %.3f [ms]", generateInitialCandidatesTime.getAverage());
+            ImGui::Text("  combineTemporalNeighbors: %.3f [ms]", combineTemporalNeighborsTime.getAverage());
+            ImGui::Text("  combineSpatialNeighbors: %.3f [ms]", combineSpatialNeighborsTime.getAverage());
+            ImGui::Text("  shading: %.3f [ms]", shadingTime.getAverage());
+            ImGui::Text("  Denoise: %.3f [ms]", denoiseTime.getAverage());
 
             ImGui::End();
         }

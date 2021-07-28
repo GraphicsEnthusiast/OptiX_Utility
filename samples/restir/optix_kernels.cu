@@ -128,9 +128,6 @@ CUDA_DEVICE_FUNCTION void setupBSDF<LambertBRDF>(const MaterialData &matData, co
 
 
 
-#define USE_FITTED_PRE_INTEGRATION_FOR_WEIGHTS
-#define USE_FITTED_PRE_INTEGRATION_FOR_DH_REFLECTANCE
-
 class DiffuseAndSpecularBRDF {
     struct GGXMicrofacetDistribution {
         float alpha_g;
@@ -190,15 +187,15 @@ class DiffuseAndSpecularBRDF {
     float m_roughness;
 
 public:
-    CUDA_DEVICE_FUNCTION DiffuseAndSpecularBRDF(const float3 &baseColor, const float3 &specularF0Color, float smoothness) {
-        m_diffuseColor = baseColor;
+    CUDA_DEVICE_FUNCTION DiffuseAndSpecularBRDF(const float3 &diffuseColor, const float3 &specularF0Color, float smoothness) {
+        m_diffuseColor = diffuseColor;
         m_specularF0Color = specularF0Color;
         m_roughness = 1 - smoothness;
     }
 
-    CUDA_DEVICE_FUNCTION DiffuseAndSpecularBRDF(const float3 &baseColor, float reflectance, float smoothness, float metallic) {
-        m_diffuseColor = baseColor * (1 - metallic);
-        m_specularF0Color = make_float3(0.16f * pow2(reflectance) * (1 - metallic)) + baseColor * metallic;
+    CUDA_DEVICE_FUNCTION DiffuseAndSpecularBRDF(const float3 &diffuseColor, float reflectance, float smoothness, float metallic) {
+        m_diffuseColor = diffuseColor * (1 - metallic);
+        m_specularF0Color = make_float3(0.16f * pow2(reflectance) * (1 - metallic)) + diffuseColor * metallic;
         m_roughness = 1 - smoothness;
     }
 
@@ -268,12 +265,12 @@ public:
 
 template<>
 CUDA_DEVICE_FUNCTION void setupBSDF<DiffuseAndSpecularBRDF>(const MaterialData &matData, const float2 &texCoord, BSDF* bsdf) {
-    float4 baseColor = tex2DLod<float4>(matData.asDiffuseAndSpecular.baseColor, texCoord.x, texCoord.y, 0.0f);
+    float4 diffuseColor = tex2DLod<float4>(matData.asDiffuseAndSpecular.diffuse, texCoord.x, texCoord.y, 0.0f);
     float4 specularF0Color = tex2DLod<float4>(matData.asDiffuseAndSpecular.specular, texCoord.x, texCoord.y, 0.0f);
     float smoothness = tex2DLod<float>(matData.asDiffuseAndSpecular.smoothness, texCoord.x, texCoord.y, 0.0f);
     auto &bsdfBody = *reinterpret_cast<DiffuseAndSpecularBRDF*>(bsdf->m_data);
-    bsdfBody = DiffuseAndSpecularBRDF(make_float3(baseColor.x, baseColor.y, baseColor.z),
-                                      make_float3(baseColor.x, baseColor.y, baseColor.z),
+    bsdfBody = DiffuseAndSpecularBRDF(make_float3(diffuseColor.x, diffuseColor.y, diffuseColor.z),
+                                      make_float3(diffuseColor.x, diffuseColor.y, diffuseColor.z),
                                       smoothness);
 }
 
@@ -396,6 +393,78 @@ CUDA_DEVICE_KERNEL void RT_RG_NAME(setupGBuffers)() {
         *plp.f->pickInfo = pickInfo;
 }
 
+CUDA_DEVICE_KERNEL void RT_CH_NAME(setupGBuffers)() {
+    uint2 launchIndex = make_uint2(optixGetLaunchIndex().x, optixGetLaunchIndex().y);
+
+    auto sbtr = HitGroupSBTRecordData::get();
+    const InstanceData &inst = plp.f->instanceDataBuffer[optixGetInstanceId()];
+    const GeometryInstanceData &geomInst = sbtr.geomInstData;
+
+    HitPointParams* hitPointParams;
+    PickInfo* pickInfo;
+    optixu::getPayloads<PrimaryRayPayloadSignature>(&hitPointParams, &pickInfo);
+
+    auto hp = HitPointParameter::get();
+    float3 p;
+    float3 prevP;
+    float3 sn;
+    float2 texCoord;
+    {
+        const Triangle &tri = geomInst.triangleBuffer[hp.primIndex];
+        const Vertex &v0 = geomInst.vertexBuffer[tri.index0];
+        const Vertex &v1 = geomInst.vertexBuffer[tri.index1];
+        const Vertex &v2 = geomInst.vertexBuffer[tri.index2];
+        float b1 = hp.b1;
+        float b2 = hp.b2;
+        float b0 = 1 - (b1 + b2);
+        float3 localP = b0 * v0.position + b1 * v1.position + b2 * v2.position;
+        sn = b0 * v0.normal + b1 * v1.normal + b2 * v2.normal;
+        //sn = cross(v1.position - v0.position,
+        //           v2.position - v0.position);
+        texCoord = b0 * v0.texCoord + b1 * v1.texCoord + b2 * v2.texCoord;
+
+        p = optixTransformPointFromObjectToWorldSpace(localP);
+        prevP = inst.prevTransform * localP;
+        sn = normalize(optixTransformNormalFromObjectToWorldSpace(sn));
+        if (!allFinite(sn))
+            sn = make_float3(0, 0, 1);
+    }
+
+    hitPointParams->positionInWorld = p;
+    hitPointParams->prevPositionInWorld = prevP;
+    hitPointParams->normalInWorld = sn;
+    hitPointParams->texCoord = texCoord;
+    hitPointParams->materialSlot = geomInst.materialSlot;
+
+    float3 vOut = -optixGetWorldRayDirection();
+
+    const MaterialData &mat = plp.s->materialDataBuffer[geomInst.materialSlot];
+    BSDF bsdf;
+    mat.setupBSDF(mat, texCoord, &bsdf);
+    ReferenceFrame shadingFrame(sn);
+    float3 vOutLocal = shadingFrame.toLocal(normalize(vOut));
+
+    if (launchIndex.x == plp.f->mousePosition.x &&
+        launchIndex.y == plp.f->mousePosition.y) {
+        pickInfo->hit = true;
+        pickInfo->instSlot = optixGetInstanceId();
+        pickInfo->geomInstSlot = geomInst.geomInstSlot;
+        pickInfo->matSlot = geomInst.materialSlot;
+        pickInfo->primIndex = hp.primIndex;
+        pickInfo->positionInWorld = p;
+        pickInfo->albedo = bsdf.getBaseColor(vOutLocal);
+        float3 emittance = make_float3(0.0f, 0.0f, 0.0f);
+        if (mat.emittance) {
+            float4 texValue = tex2DLod<float4>(mat.emittance, texCoord.x, texCoord.y, 0.0f);
+            emittance = make_float3(texValue);
+        }
+        pickInfo->emittance = emittance;
+        pickInfo->normalInWorld = sn;
+    }
+}
+
+
+
 CUDA_DEVICE_FUNCTION float3 sampleLight(float ul, float u0, float u1,
                                         LightSample* lightSample, float3* lightPosition, float3* lightNormal, float* areaPDensity) {
     float lightProb = 1.0f;
@@ -460,11 +529,11 @@ CUDA_DEVICE_FUNCTION float3 sampleLight(float ul, float u0, float u1,
     //       lightPosition->x, lightPosition->y, lightPosition->z,
     //       lightNormal->x, lightNormal->y, lightNormal->z);
 
-    float3 emittance = mat.emittanceScale;
+    float3 emittance = make_float3(0.0f, 0.0f, 0.0f);
     if (mat.emittance) {
         float2 texCoord = t0 * v[0].texCoord + t1 * v[1].texCoord + t2 * v[2].texCoord;
         float4 texValue = tex2DLod<float4>(mat.emittance, texCoord.x, texCoord.y, 0.0f);
-        emittance *= make_float3(texValue);
+        emittance = make_float3(texValue);
     }
 
     return emittance;
@@ -493,11 +562,11 @@ CUDA_DEVICE_FUNCTION float3 evaluateLight(const LightSample &lightSample, float3
     float area = length(*lightNormal);
     *lightNormal = (inst.normalMatrix * *lightNormal) / area;
 
-    float3 emittance = mat.emittanceScale;
+    float3 emittance = make_float3(0.0f, 0.0f, 0.0f);
     if (mat.emittance) {
         float2 texCoord = t0 * v[0].texCoord + t1 * v[1].texCoord + t2 * v[2].texCoord;
         float4 texValue = tex2DLod<float4>(mat.emittance, texCoord.x, texCoord.y, 0.0f);
-        emittance *= make_float3(texValue);
+        emittance = make_float3(texValue);
     }
 
     return emittance;
@@ -596,50 +665,6 @@ CUDA_DEVICE_FUNCTION bool evaluateVisibility(
     return visibility > 0.0f;
 }
 
-CUDA_DEVICE_KERNEL void RT_CH_NAME(setupGBuffers)() {
-    uint2 launchIndex = make_uint2(optixGetLaunchIndex().x, optixGetLaunchIndex().y);
-
-    auto sbtr = HitGroupSBTRecordData::get();
-    const InstanceData &inst = plp.f->instanceDataBuffer[optixGetInstanceId()];
-    const GeometryInstanceData &geomInst = sbtr.geomInstData;
-
-    HitPointParams* hitPointParams;
-    PickInfo* pickInfo;
-    optixu::getPayloads<PrimaryRayPayloadSignature>(&hitPointParams, &pickInfo);
-
-    auto hp = HitPointParameter::get();
-    float3 p;
-    float3 prevP;
-    float3 sn;
-    float2 texCoord;
-    {
-        const Triangle &tri = geomInst.triangleBuffer[hp.primIndex];
-        const Vertex &v0 = geomInst.vertexBuffer[tri.index0];
-        const Vertex &v1 = geomInst.vertexBuffer[tri.index1];
-        const Vertex &v2 = geomInst.vertexBuffer[tri.index2];
-        float b1 = hp.b1;
-        float b2 = hp.b2;
-        float b0 = 1 - (b1 + b2);
-        float3 localP = b0 * v0.position + b1 * v1.position + b2 * v2.position;
-        sn = b0 * v0.normal + b1 * v1.normal + b2 * v2.normal;
-        //sn = cross(v1.position - v0.position,
-        //           v2.position - v0.position);
-        texCoord = b0 * v0.texCoord + b1 * v1.texCoord + b2 * v2.texCoord;
-
-        p = optixTransformPointFromObjectToWorldSpace(localP);
-        prevP = inst.prevTransform * localP;
-        sn = normalize(optixTransformNormalFromObjectToWorldSpace(sn));
-        if (!allFinite(sn))
-            sn = make_float3(0, 0, 1);
-    }
-
-    hitPointParams->positionInWorld = p;
-    hitPointParams->prevPositionInWorld = prevP;
-    hitPointParams->normalInWorld = sn;
-    hitPointParams->texCoord = texCoord;
-    hitPointParams->materialSlot = geomInst.materialSlot;
-}
-
 
 
 CUDA_DEVICE_KERNEL void RT_RG_NAME(generateInitialCandidates)() {
@@ -648,7 +673,6 @@ CUDA_DEVICE_KERNEL void RT_RG_NAME(generateInitialCandidates)() {
     PCG32RNG rng = plp.s->rngBuffer.read(launchIndex);
 
     uint32_t curBufIdx = plp.f->bufferIndex;
-    uint32_t prevBufIdx = (curBufIdx + 1) % 2;
     GBuffer0 gBuffer0 = plp.s->GBuffer0[curBufIdx].read(launchIndex);
     GBuffer1 gBuffer1 = plp.s->GBuffer1[curBufIdx].read(launchIndex);
     GBuffer2 gBuffer2 = plp.s->GBuffer2[curBufIdx].read(launchIndex);
@@ -656,7 +680,6 @@ CUDA_DEVICE_KERNEL void RT_RG_NAME(generateInitialCandidates)() {
     float3 positionInWorld = gBuffer0.positionInWorld;
     float3 normalInWorld = gBuffer1.normalInWorld;
     float2 texCoord = make_float2(gBuffer0.texCoord_x, gBuffer1.texCoord_y);
-    float2 motionVector = gBuffer2.motionVector;
     uint32_t materialSlot = gBuffer2.materialSlot;
 
     if (allFinite(positionInWorld)) {
@@ -1137,10 +1160,10 @@ CUDA_DEVICE_KERNEL void RT_RG_NAME(shading)() {
 
         contribution = make_float3(0.0f);
         if (vOutLocal.z > 0) {
-            float3 emittance = mat.emittanceScale;
+            float3 emittance = make_float3(0.0f, 0.0f, 0.0f);
             if (mat.emittance) {
                 float4 texValue = tex2DLod<float4>(mat.emittance, texCoord.x, texCoord.y, 0.0f);
-                emittance *= make_float3(texValue);
+                emittance = make_float3(texValue);
             }
             contribution += emittance / Pi;
         }
