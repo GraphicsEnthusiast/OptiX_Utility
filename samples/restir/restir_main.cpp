@@ -790,14 +790,28 @@ static Material* createLambertMaterial(
         hpprintf("Reading: %s ... ", emittancePath.string().c_str());
         uint8_t* linearImageData = stbi_load(emittancePath.string().c_str(),
                                              &width, &height, &n, 4);
-        hpprintf("done.\n");
-        mat->emittance.initialize2D(
-            gpuEnv.cuContext, cudau::ArrayElementType::UInt8, 4,
-            cudau::ArraySurface::Disable, cudau::ArrayTextureGather::Disable,
-            width, height, 1);
-        mat->emittance.write<uint8_t>(linearImageData, width * height * 4);
-        stbi_image_free(linearImageData);
-        mat->texEmittance = sampler_sRGB.createTextureObject(mat->emittance);
+        if (linearImageData) {
+            hpprintf("done.\n");
+            mat->emittance.initialize2D(
+                gpuEnv.cuContext, cudau::ArrayElementType::UInt8, 4,
+                cudau::ArraySurface::Disable, cudau::ArrayTextureGather::Disable,
+                width, height, 1);
+            mat->emittance.write<uint8_t>(linearImageData, width * height * 4);
+            stbi_image_free(linearImageData);
+            mat->texEmittance = sampler_sRGB.createTextureObject(mat->emittance);
+        }
+        else {
+            hpprintf("failed.\n");
+            float data[4] = {
+                immEmittance.x, immEmittance.y, immEmittance.z, 1.0f
+            };
+            mat->emittance.initialize2D(
+                gpuEnv.cuContext, cudau::ArrayElementType::Float32, 4,
+                cudau::ArraySurface::Disable, cudau::ArrayTextureGather::Disable,
+                1, 1, 1);
+            mat->emittance.write(data, 4);
+            mat->texEmittance = sampler_float.createTextureObject(mat->emittance);
+        }
     }
 
     mat->materialSlot = gpuEnv.materialSlotFinder.getFirstAvailableSlot();
@@ -1098,7 +1112,7 @@ static void createTriangleMeshes(
         std::filesystem::path reflectancePath;
         float3 immReflectance;
         std::filesystem::path emittancePath;
-        float3 emittanceScale;
+        float3 immEmittance = float3(0.0f);
 
         const aiMaterial* aiMat = scene->mMaterials[matIdx];
         aiString strValue;
@@ -1120,22 +1134,15 @@ static void createTriangleMeshes(
             immReflectance = float3(color[0], color[1], color[2]);
         }
 
-        if (aiMat->Get(AI_MATKEY_TEXTURE_EMISSIVE(0), strValue) == aiReturn_SUCCESS) {
+        if (aiMat->Get(AI_MATKEY_TEXTURE_EMISSIVE(0), strValue) == aiReturn_SUCCESS)
             emittancePath = dirPath / strValue.C_Str();
-        }
-
-        if (aiMat->Get(AI_MATKEY_COLOR_EMISSIVE, color, nullptr) == aiReturn_SUCCESS)
-            emittanceScale = float3(color[0], color[1], color[2]);
-        else
-            emittanceScale = float3(0.0f);
-
-        if (!emittancePath.empty() && emittanceScale == float3(0.0f))
-            emittanceScale = float3(1.0f);
+        else if (aiMat->Get(AI_MATKEY_COLOR_EMISSIVE, color, nullptr) == aiReturn_SUCCESS)
+            immEmittance = float3(color[0], color[1], color[2]);
 
         materials.push_back(createLambertMaterial(
             gpuEnv,
             reflectancePath, immReflectance,
-            emittancePath, emittanceScale));
+            emittancePath, immEmittance));
     }
 
     geomInsts.clear();
@@ -2356,6 +2363,7 @@ int32_t main(int32_t argc, const char* argv[]) try {
         static bool animate = false;// true;
         bool resetAccumulation = false;
         static bool enableAccumulation = true;
+        static bool enableJittering = false;
         bool lastFrameWasAnimated = false;
         static bool useUnbiasedEstimator = false;
         static int32_t log2NumCandidateSamples = 5;
@@ -2384,6 +2392,7 @@ int32_t main(int32_t argc, const char* argv[]) try {
             if (ImGui::Button("Reset Accum"))
                 resetAccumulation = true;
             ImGui::Checkbox("Enable Accumulation", &enableAccumulation);
+            resetAccumulation |= ImGui::Checkbox("Enable Jittering", &enableJittering);
 
             ImGui::Separator();
             ImGui::Text("Cursor Info:");
@@ -2574,6 +2583,7 @@ int32_t main(int32_t argc, const char* argv[]) try {
         perFramePlp.reuseVisibility = reuseVisibility;
         perFramePlp.bufferIndex = bufferIndex;
         perFramePlp.resetFlowBuffer = newSequence;
+        perFramePlp.enableJittering = enableJittering;
         for (int i = 0; i < lengthof(debugSwitches); ++i)
             perFramePlp.setDebugSwitch(i, debugSwitches[i]);
 
@@ -2585,16 +2595,23 @@ int32_t main(int32_t argc, const char* argv[]) try {
         plp.currentReservoirIndex = currentReservoirIndex;
         CUDADRV_CHECK(cuMemcpyHtoDAsync(plpOnDevice, &plp, sizeof(plp), cuStream));
 
+        // JP: Gバッファーのセットアップ。
+        // EN: Setup the G-buffers.
         curGPUTimer.setupGBuffers.start(cuStream);
         gpuEnv.pipeline.setRayGenerationProgram(gpuEnv.setupGBuffersRayGenProgram);
         gpuEnv.pipeline.launch(cuStream, plpOnDevice, renderTargetSizeX, renderTargetSizeY, 1);
         curGPUTimer.setupGBuffers.stop(cuStream);
 
+        // JP: 各ピクセルで独立したStreaming RISを実行。
+        // EN: Perform independent streaming RIS on each pixel.
         curGPUTimer.generateInitialCandidates.start(cuStream);
         gpuEnv.pipeline.setRayGenerationProgram(gpuEnv.generateInitialCandidatesRayGenProgram);
         gpuEnv.pipeline.launch(cuStream, plpOnDevice, renderTargetSizeX, renderTargetSizeY, 1);
         curGPUTimer.generateInitialCandidates.stop(cuStream);
 
+        // JP: 各ピクセルにおいて前フレームの(時間的)隣接ピクセルとの間でReservoirの結合を行う。
+        // EN: For each pixel, combine reservoirs between the current pixel and
+        //     (temporally) neighboring pixel from the previous frame.
         curGPUTimer.combineTemporalNeighbors.start(cuStream);
         if (enableTemporalReuse && !newSequence) {
             if (useUnbiasedEstimator)
@@ -2605,6 +2622,9 @@ int32_t main(int32_t argc, const char* argv[]) try {
         }
         curGPUTimer.combineTemporalNeighbors.stop(cuStream);
 
+        // JP: 各ピクセルにおいて(空間的)隣接ピクセルとの間でReservoirの結合を行う。
+        // EN: For each pixel, combine reservoirs between the current pixel and
+        //     (Spatially) neighboring pixels.
         curGPUTimer.combineSpatialNeighbors.start(cuStream);
         if (enableSpatialReuse) {
             int32_t numSpatialReusePasses;
@@ -2628,6 +2648,8 @@ int32_t main(int32_t argc, const char* argv[]) try {
         }
         curGPUTimer.combineSpatialNeighbors.stop(cuStream);
 
+        // JP: 生き残ったサンプルを使ってシェーディングを実行。
+        // EN: Perform shading using the survived samples.
         curGPUTimer.shading.start(cuStream);
         CUDADRV_CHECK(cuMemcpyHtoDAsync(plpOnDevice, &plp, sizeof(plp), cuStream));
         gpuEnv.pipeline.setRayGenerationProgram(gpuEnv.shadingRayGenProgram);
