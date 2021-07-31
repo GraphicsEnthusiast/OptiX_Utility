@@ -38,7 +38,7 @@ EN:
 #include "../../ext/stb_image.h"
 
 // Include glfw3.h after our OpenGL definitions
-#include "../utils/gl_util.h"
+#include "../common/gl_util.h"
 #include <GLFW/glfw3.h>
 
 #include "imgui.h"
