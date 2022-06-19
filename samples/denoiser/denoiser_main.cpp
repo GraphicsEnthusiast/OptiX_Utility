@@ -46,11 +46,20 @@ int32_t main(int32_t argc, const char* argv[]) try {
                                 DEBUG_SELECT(OPTIX_EXCEPTION_FLAG_DEBUG, OPTIX_EXCEPTION_FLAG_NONE),
                                 OPTIX_PRIMITIVE_TYPE_FLAGS_TRIANGLE);
 
+#define USE_OPTIX_IR 1
+#if USE_OPTIX_IR
     const std::vector<char> optixIr = readBinaryFile(getExecutableDirectory() / "denoiser/ptxes/optix_kernels.optixir");
     optixu::Module moduleOptiX = pipeline.createModuleFromOptixIR(
         optixIr, OPTIX_COMPILE_DEFAULT_MAX_REGISTER_COUNT,
         DEBUG_SELECT(OPTIX_COMPILE_OPTIMIZATION_LEVEL_0, OPTIX_COMPILE_OPTIMIZATION_DEFAULT),
         DEBUG_SELECT(OPTIX_COMPILE_DEBUG_LEVEL_FULL, OPTIX_COMPILE_DEBUG_LEVEL_NONE));
+#else
+    const std::string ptxString = readTxtFile(getExecutableDirectory() / "denoiser/ptxes/optix_kernels.ptx");
+    optixu::Module moduleOptiX = pipeline.createModuleFromPTXString(
+        ptxString, OPTIX_COMPILE_DEFAULT_MAX_REGISTER_COUNT,
+        DEBUG_SELECT(OPTIX_COMPILE_OPTIMIZATION_LEVEL_0, OPTIX_COMPILE_OPTIMIZATION_DEFAULT),
+        DEBUG_SELECT(OPTIX_COMPILE_DEBUG_LEVEL_FULL, OPTIX_COMPILE_DEBUG_LEVEL_NONE));
+#endif
 
     optixu::Module emptyModule;
 
