@@ -6,6 +6,7 @@ namespace Shared {
     static constexpr float Pi = 3.14159265358979323846f;
 
     static constexpr bool usePayloadAnnotation = true;
+    static constexpr bool useOptixUtil = false;
 
 
 
